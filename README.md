@@ -2,12 +2,14 @@
 
 [YouTube Video](https://youtu.be/9UERVVwpNew)
 
-This is a small proof-of-concept language model (not an LLM) that incorporates the following (and some smaller features as well):
+This is a small proof-of-concept language model (not an LLM) that aims to incorporate the following (and some smaller features as well):
 * Latent-space prediction
 * Internal state + recurrent trace units (RTUs)
 * Byte input/output
 * Continuous data streaming
 * Test-time training
+
+It is not a finished work.
 
 The model is built with MLX, so it should run fine on all Apple Silicon devices. MLX on Linux has been tested by community members and it should work fine as well. On Windows, there are a few unofficial work-in-progress Pytorch ports but they aren't 1:1 compatible yet. I have managed to get the model running on WSL however, and it does train.
 
