@@ -18,13 +18,15 @@ def load_config(path=None):
     except TypeError as error:
         raise ValueError(f'invalid model config: {error}') from error
     settings.apply_defaults()
-    return {
+    resolved = {
         name: list(value) if isinstance(value, tuple) else value
         for name, value in settings.arguments.items()
     }
+    return _validate_model_settings(resolved, 'model config')
 
 
 def new_model(settings, seed):
+    _validate_model_settings(settings, 'model config')
     import random
     import mlx.core as mx
     from tmt.main import Model
@@ -47,22 +49,24 @@ def _validate_metadata(raw):
         raise ValueError("checkpoint tmt metadata must contain exactly 'version' and 'model'")
     if type(value['version']) is not int or value['version'] != 1:
         raise ValueError('checkpoint.version must be integer 1')
+    return _validate_model_settings(value['model'], 'checkpoint.model')
 
+
+def _validate_model_settings(settings, label):
     from tmt.main import Model
     parameters = inspect.signature(Model).parameters
-    settings = value['model']
     if not isinstance(settings, dict):
-        raise ValueError('checkpoint.model must be an object')
+        raise ValueError(f'{label} must be an object')
     missing = sorted(set(parameters) - set(settings))
     extra = sorted(set(settings) - set(parameters))
     if missing:
-        raise ValueError(f'checkpoint.model is missing field {missing[0]!r}')
+        raise ValueError(f'{label} is missing field {missing[0]!r}')
     if extra:
-        raise ValueError(f'checkpoint.model has unknown field {extra[0]!r}')
+        raise ValueError(f'{label} has unknown field {extra[0]!r}')
 
     for name in ('dim', 'layers', 'spread'):
         if type(settings[name]) is not int or settings[name] <= 0:
-            raise ValueError(f'checkpoint.model.{name} must be a positive integer')
+            raise ValueError(f'{label}.{name} must be a positive integer')
     for name, minimum, strict in (('temp', 0, False), ('rate', 0, True)):
         number = settings[name]
         try:
@@ -71,18 +75,18 @@ def _validate_metadata(raw):
             finite = False
         if not finite or (number <= minimum if strict else number < minimum):
             rule = 'a finite positive number' if strict else 'a finite nonnegative number'
-            raise ValueError(f'checkpoint.model.{name} must be {rule}')
+            raise ValueError(f'{label}.{name} must be {rule}')
     bound = settings['bound']
     if (not isinstance(bound, list) or len(bound) != 2
             or any(type(value) is not int for value in bound)
             or not 0 <= bound[0] < bound[1]):
-        raise ValueError('checkpoint.model.bound must be two integers with 0 <= start < end')
+        raise ValueError(f'{label}.bound must be two integers with 0 <= start < end')
 
     for name, item in settings.items():
         try:
             json.dumps(item, allow_nan=False)
         except (TypeError, ValueError) as error:
-            raise ValueError(f'checkpoint.model.{name} must contain finite JSON values') from error
+            raise ValueError(f'{label}.{name} must contain finite JSON values') from error
 
     for name, parameter in parameters.items():
         if name in {'dim', 'layers', 'spread', 'temp', 'rate', 'bound'}:
@@ -101,7 +105,7 @@ def _validate_metadata(raw):
         else:
             valid = type(item) is type(default)
         if not valid:
-            raise ValueError(f'checkpoint.model.{name} has an invalid JSON type')
+            raise ValueError(f'{label}.{name} has an invalid JSON type')
     return settings
 
 
@@ -446,6 +450,7 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
 
 
 def evaluate_command(args):
+    _positive(args.max_bytes, 'max-bytes')
     for window in args.windows:
         _positive(window, 'evaluation windows')
     from tmt.benchmark import evaluate as score
@@ -505,6 +510,7 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
     """Run each model and seed pair in JSON product order."""
     _positive(updates, 'updates')
     _positive(log_every, 'log-every')
+    _positive(max_bytes, 'max-bytes')
     _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
                          eval_every, eval_max_bytes)
     from tmt.benchmark import evaluate
@@ -528,6 +534,7 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
         run_seed = overrides.pop('seed', seed)
         run_settings = dict(settings)
         run_settings.update(overrides)
+        _validate_model_settings(run_settings, 'model config')
         run_path = output / f'run-{index:04d}'
         run_path.mkdir(parents=True, exist_ok=True)
         manifest_dir = run_path / 'manifest'
@@ -642,7 +649,7 @@ def build_parser():
     evaluation = commands.add_parser('evaluate', help='score next-byte predictions')
     evaluation.add_argument('checkpoint', help='strict model and optimizer checkpoint')
     evaluation.add_argument('--data', required=True, help='quoted raw-file glob, one document per file')
-    evaluation.add_argument('--max-bytes', type=int, default=8192, help='global input-byte prefix across sorted files, default: 8192')
+    evaluation.add_argument('--max-bytes', type=int, default=8192, help='positive global input-byte prefix across sorted files, default: 8192')
     evaluation.add_argument('--windows', type=int, nargs='+', default=[], help='context lengths in input bytes; default: no windows')
     evaluation.add_argument('--output', help='optional JSON score file; default: terminal only')
     benchmark = commands.add_parser('benchmark', help='run byte and CoLA benchmarks')
@@ -669,7 +676,7 @@ def build_parser():
     sweeping.add_argument('--log-every', type=int, default=100, help='positive loss report interval per candidate, default: 100')
     sweeping.add_argument('--seed', type=int, default=11, help='seed when absent from grid, default: 11')
     sweeping.add_argument('--ce-only', action='store_true', help='next-byte cross entropy only; default: full TMT objective')
-    sweeping.add_argument('--max-bytes', type=int, default=8192, help='global development input-byte prefix, default: 8192')
+    sweeping.add_argument('--max-bytes', type=int, default=8192, help='positive global development input-byte prefix, default: 8192')
     monitoring_options(sweeping)
     commands.add_parser('help', help='read the bundled command manual or one topic')
     return parser

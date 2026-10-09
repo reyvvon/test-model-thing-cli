@@ -5,7 +5,9 @@ File errors and invalid values print a short error to stderr and exit with code 
 
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
-The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `dim`, `layers`, and `spread` are integer sizes. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss. Commands check the count limits that this manual lists.
+The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
+
+`dim`, `layers`, and `spread` must be positive integers. `temp` must be a finite nonnegative number. `rate` must be a finite positive number. `bound` must be a JSON array of two integers with `0 <= start < end`. Boolean values are invalid for these fields. The CLI checks config values and sweep grid values before model creation.
 
 ## init
 
@@ -171,7 +173,7 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH
 - `--log-every N` sets the progress interval in updates for each candidate. The default is `100`. Use a positive value.
 - `--seed N` sets the seed when the grid has no `seed` field. The default is `11`.
 - `--ce-only` selects next-byte cross entropy. The default objective is full TMT.
-- `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes.
+- `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes. Use a positive value. Zero and negative values cause an input error.
 - `--sample-every N` writes a sample after each N completed updates for each candidate. The command writes no samples by default. Use a positive value.
 - `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
 - `--sample-seed N` sets the sample seed. The default is `11`.
@@ -216,7 +218,7 @@ tmt evaluate CHECKPOINT --data GLOB [--max-bytes N] [--windows N [N ...]] [--out
 
 - `CHECKPOINT` is required. It must contain valid model and optimizer tensors.
 - `--data GLOB` is required. Quote the glob so the CLI expands it.
-- `--max-bytes N` sets the global input-byte limit across sorted files. The default is `8192` bytes.
+- `--max-bytes N` sets the global input-byte limit across sorted files. The default is `8192` bytes. Use a positive value. Zero and negative values cause an input error.
 - `--windows N [N ...]` selects context lengths in input bytes. The default is no context-window scores. Every value must be positive.
 - `--output PATH` writes the score object as JSON. Without this option, scores go to the terminal.
 - Evaluation needs MLX and at least one file that matches `GLOB`.

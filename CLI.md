@@ -77,6 +77,8 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 ```
 
 Train and sweep default to `model.json`. An explicit `--config PATH` overrides it for a fresh run.
+The CLI checks config types and limits before model creation. The [command manual](src/tmt/commands.md) lists these limits.
+Evaluation and sweep require a positive `--max-bytes` value. Zero and negative values cause an input error.
 `--run NAME` creates `runs/NAME/model.safetensors` in a new folder.
 With neither a name nor a checkpoint, train uses a UTC timestamp with microseconds as the run folder name.
 

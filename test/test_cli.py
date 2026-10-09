@@ -177,6 +177,14 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 self.assertFalse((root / 'invalid').exists())
                 result = run('evaluate', 'missing.safetensors', '--data', 'dev.bin', '--windows', count)
                 self.assertIn('evaluation windows must be positive', result.stderr)
+                result = run('evaluate', 'missing.safetensors', '--data', 'dev.bin', '--max-bytes', count,
+                             '--output', 'score.json')
+                self.assertIn('max-bytes must be positive', result.stderr)
+                self.assertFalse((root / 'score.json').exists())
+                result = run('sweep', '--grid', 'grid.json', '--data', 'train.bin',
+                             '--development', 'dev.bin', '--output', 'invalid', '--max-bytes', count)
+                self.assertIn('max-bytes must be positive', result.stderr)
+                self.assertFalse((root / 'invalid').exists())
                 result = run('generate', 'missing.safetensors', '--prompt', 'x',
                              '--output', 'sample.bin', '--log-every', count)
                 self.assertIn('log-every must be positive', result.stderr)
@@ -193,10 +201,19 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertIn('not empty', result.stderr)
             self.assertEqual(before, {p: p.read_bytes() for p in (root / 'sweep').rglob('*') if p.is_file()})
             checkpoint = root / 'sweep/run-0001/model.safetensors'
-            for contents in ('{', '[]', '{"unknown": 1}'):
+            for contents in ('{', '[]', '{"unknown": 1}', '{"bound": 30}', '{"dim": true}', '{"rate": 0}'):
                 (root / 'bad.json').write_text(contents)
                 run('train', '--data', 'train.bin', '--config', 'bad.json', '--run', 'bad')
                 self.assertFalse((root / 'runs/bad').exists())
+            (root / 'bad-grid.json').write_text('{"bound": [30]}')
+            result = run('sweep', '--grid', 'bad-grid.json', '--data', 'train.bin',
+                         '--development', 'dev.bin', '--output', 'bad-sweep')
+            self.assertIn('model config.bound must be two integers', result.stderr)
+            self.assertEqual(list((root / 'bad-sweep').iterdir()), [])
+            result = run('evaluate', str(checkpoint), '--data', 'dev.bin', '--max-bytes', '2',
+                         '--output', 'score.json', success=True)
+            score = json.loads((root / 'score.json').read_text())
+            self.assertEqual((score['input_bytes'], score['targets']), (2, 1))
             run('generate', 'missing.safetensors', '--prompt', 'x', '--output', 'sample.bin')
             (root / 'invalid.safetensors').write_bytes(b'invalid')
             run('evaluate', 'invalid.safetensors', '--data', 'dev.bin')
@@ -274,6 +291,55 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
         extended.__signature__ = inspect.Signature(parameters)
         with patch('tmt.main.Model', extended):
             self.assertEqual(load_config()['extra'], 17)
+
+    def test_invalid_config_values(self):
+        from tmt.cli import _validate_metadata, load_config, new_model
+
+        cases = []
+        for name in ('dim', 'layers', 'spread'):
+            cases.extend((name, value) for value in (True, 0, -1, 4.0, '4', None, [], {}))
+        for name in ('temp', 'rate'):
+            cases.extend((name, value) for value in (True, -1, '1', None, [], {},
+                                                   float('nan'), float('inf'), -float('inf'), 10 ** 400))
+        cases.append(('rate', 0))
+        cases.extend(('bound', value) for value in (30, None, '0,1', {}, [], [0], [0, 1, 2],
+                                                   [-1, 1], [1, 1], [2, 1], [False, 1], [0, 1.0]))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'model.json'
+            for name, value in cases:
+                with self.subTest(name=name, value=value):
+                    path.write_text(json.dumps({name: value}))
+                    with self.assertRaisesRegex(ValueError, f'model config.{name}'):
+                        load_config(path)
+                    settings = dict(self._tiny_settings(), **{name: value})
+                    with self.assertRaisesRegex(ValueError, f'model config.{name}'):
+                        new_model(settings, 11)
+                    raw = json.dumps({'version': 1, 'model': settings})
+                    with self.assertRaisesRegex(ValueError, f'checkpoint.model.{name}'):
+                        _validate_metadata(raw)
+            path.write_text('{"dim": 1, "layers": 1, "spread": 1, "temp": 0, "rate": 1, "bound": [0, 1]}')
+            settings = load_config(path)
+            self.assertEqual((settings['temp'], settings['rate'], settings['bound']), (0, 1, [0, 1]))
+
+    def test_evaluation_byte_limits(self):
+        from tmt.cli import build_parser, documents, evaluate_command, sweep
+
+        for limit in (0, -1):
+            with self.subTest(limit=limit), patch('tmt.cli.load_model') as load:
+                args = build_parser().parse_args(['evaluate', 'missing.safetensors', '--data', 'missing/*',
+                                                  '--max-bytes', str(limit)])
+                with self.assertRaisesRegex(ValueError, 'max-bytes must be positive'):
+                    evaluate_command(args)
+                load.assert_not_called()
+                with self.assertRaisesRegex(ValueError, 'max-bytes must be positive'):
+                    sweep('missing.json', 'missing/*', 'missing/*', 'unused', max_bytes=limit)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'a.bin').write_bytes(b'abcd')
+            (root / 'b.bin').write_bytes(b'efgh')
+            pattern = str(root / '*.bin')
+            self.assertEqual(list(documents(pattern, 6)), [b'abcd', b'ef'])
+            self.assertEqual(list(documents(pattern, 1)), [b'a'])
 
     def _tiny_settings(self):
         return {'dim': 4, 'layers': 1, 'spread': 4, 'temp': 0.75,
