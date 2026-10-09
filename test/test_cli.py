@@ -192,6 +192,28 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             result = run('generate', 'missing.safetensors', '--prompt', 'x',
                          '--output', 'sample.bin', '--bytes', '-1')
             self.assertIn('bytes must be nonnegative', result.stderr)
+            for temperature in ('nan', 'inf', '-inf', '-1'):
+                result = run('generate', 'missing.safetensors', '--prompt', 'x',
+                             '--output', 'sample.bin', f'--temperature={temperature}')
+                self.assertIn('temperature must be a finite nonnegative number', result.stderr)
+                self.assertFalse((root / 'sample.bin').exists())
+            for epochs in ('0', '-1'):
+                result = run('benchmark', 'missing.safetensors', '--cola-data', 'missing.tsv',
+                             '--epochs', epochs)
+                self.assertIn('epochs must be positive with cola-data', result.stderr)
+                result = subprocess.run([sys.executable, '-m', 'tmt.benchmark', 'missing.safetensors',
+                                         '--cola-data', 'missing.tsv', '--epochs', epochs], cwd=root,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn('epochs must be positive with cola-data', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+            for grid in ([4], None, {'dim': 4}, {'dim': []}, {'dim': [4], 'seed': []},
+                         {'dim': [4, 0]}, {'unknown': [1]}, {'seed': [11, '22']}):
+                with self.subTest(grid=grid):
+                    (root / 'bad-grid.json').write_text(json.dumps(grid))
+                    result = run('sweep', '--grid', 'bad-grid.json', '--data', 'train.bin',
+                                 '--development', 'dev.bin', '--output', 'bad-sweep', '--updates', '1')
+                    self.assertFalse((root / 'bad-sweep').exists())
             args = ['sweep', '--grid', 'grid.json', '--data', 'train.bin',
                     '--development', 'dev.bin', '--output', 'sweep', '--updates', '2']
             (root / 'sweep').mkdir()  # An existing empty folder is valid.
@@ -209,7 +231,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             result = run('sweep', '--grid', 'bad-grid.json', '--data', 'train.bin',
                          '--development', 'dev.bin', '--output', 'bad-sweep')
             self.assertIn('model config.bound must be two integers', result.stderr)
-            self.assertEqual(list((root / 'bad-sweep').iterdir()), [])
+            self.assertFalse((root / 'bad-sweep').exists())
             result = run('evaluate', str(checkpoint), '--data', 'dev.bin', '--max-bytes', '2',
                          '--output', 'score.json', success=True)
             score = json.loads((root / 'score.json').read_text())
@@ -713,6 +735,70 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             with self.assertRaisesRegex(ValueError, 'bytes must be nonnegative'):
                 generate(path, 'The ', first_path, count=-1)
             self.assertEqual(first_path.read_bytes(), b'')
+            minimum = generate(path, 'The ', first_path, count=2, temperature=0.1)
+            for temperature in (0, 0.05):
+                with self.subTest(temperature=temperature):
+                    self.assertEqual(generate(path, 'The ', first_path, count=2,
+                                              temperature=temperature), minimum)
+
+    def test_generate_rejects_invalid_temperature_before_output(self):
+        from tmt.cli import generate
+
+        with tempfile.TemporaryDirectory() as directory, patch('tmt.cli.load_model') as load:
+            output = Path(directory) / 'sample.bin'
+            for existing in (False, True):
+                if existing:
+                    output.write_bytes(b'keep')
+                for temperature in (float('nan'), float('inf'), -float('inf'), -0.1):
+                    with self.subTest(existing=existing, temperature=temperature):
+                        with self.assertRaisesRegex(ValueError, 'temperature must be a finite nonnegative number'):
+                            generate('missing.safetensors', 'The ', output, temperature=temperature)
+                        if existing:
+                            self.assertEqual(output.read_bytes(), b'keep')
+                        else:
+                            self.assertFalse(output.exists())
+            load.assert_not_called()
+
+    def test_benchmark_rejects_nonpositive_cola_epochs_before_work(self):
+        from tmt.benchmark import run
+
+        with patch('tmt.cli.load_model') as load, patch('tmt.benchmark.evaluate') as evaluate:
+            model = Mock()
+            for epochs in (0, -1):
+                for supplied in (None, model):
+                    with self.subTest(epochs=epochs, supplied=supplied is not None):
+                        with self.assertRaisesRegex(ValueError, 'epochs must be positive with cola-data'):
+                            run('missing.safetensors', epochs, data='missing.tsv', model=supplied)
+            load.assert_not_called()
+            evaluate.assert_not_called()
+            model.freeze.assert_not_called()
+
+    def test_sweep_rejects_invalid_grid_before_output(self):
+        from tmt.cli import sweep
+
+        cases = [(grid, 'sweep grid must be a JSON object') for grid in (None, 4, [], 'dim')]
+        cases.extend(({'dim': axis}, "sweep grid field 'dim' must be a nonempty array")
+                     for axis in (4, None, '4', {}, [], True))
+        cases.extend((({'dim': [4], 'seed': []}, "sweep grid field 'seed' must be a nonempty array"),
+                      ({'dim': [4, 0]}, 'model config.dim must be a positive integer'),
+                      ({'seed': [11, True]}, 'sweep grid seed must be an integer')))
+        with tempfile.TemporaryDirectory() as directory, patch('tmt.cli.train') as train:
+            root = Path(directory)
+            config, grid_path, output = root / 'model.json', root / 'grid.json', root / 'sweep'
+            config.write_text(json.dumps(self._tiny_settings()))
+            for existing in (False, True):
+                if existing:
+                    output.mkdir()
+                for grid, message in cases:
+                    with self.subTest(existing=existing, grid=grid):
+                        grid_path.write_text(json.dumps(grid))
+                        with self.assertRaisesRegex(ValueError, message):
+                            sweep(grid_path, 'missing/*', 'missing/*', output, config, updates=1)
+                        if existing:
+                            self.assertEqual(list(output.iterdir()), [])
+                        else:
+                            self.assertFalse(output.exists())
+            train.assert_not_called()
 
     def test_sweep(self):
         from io import StringIO

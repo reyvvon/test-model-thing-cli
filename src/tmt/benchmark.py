@@ -162,6 +162,8 @@ def benchmark(model: Model, data: list, train: bool, head: Classification, optim
     return {'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn, 'mcc': mcc(tp, tn, fp, fn)}
 
 def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None, *, model=None, seed=11):
+    if data is not None and epochs < 1:
+        raise ValueError('epochs must be positive with cola-data')
     if model is None:
         from tmt.cli import load_model
         model, _ = load_model(path, seed)
@@ -218,4 +220,7 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=11)
 
     args = parser.parse_args()
-    run(args.checkpoint, args.epochs, args.split, args.cola_data, seed=args.seed)
+    try:
+        run(args.checkpoint, args.epochs, args.split, args.cola_data, seed=args.seed)
+    except (OSError, ValueError) as error:
+        parser.exit(1, f'tmt: error: {error}\n')

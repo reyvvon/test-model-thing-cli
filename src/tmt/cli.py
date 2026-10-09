@@ -476,6 +476,8 @@ def generate(checkpoint, prompt, output, seed=11, count=512, temperature=None,
     if count < 0:
         raise ValueError('bytes must be nonnegative')
     _positive(log_every, 'log-every')
+    if temperature is not None and (not math.isfinite(temperature) or temperature < 0):
+        raise ValueError('temperature must be a finite nonnegative number')
 
     import mlx.core as mx
 
@@ -518,6 +520,19 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
     settings = load_config(config)
     with open(grid_path) as file:
         grid = json.load(file)
+    if not isinstance(grid, dict):
+        raise ValueError('sweep grid must be a JSON object')
+    for key, axis in grid.items():
+        if not isinstance(axis, list) or not axis:
+            raise ValueError(f'sweep grid field {key!r} must be a nonempty array')
+        for value in axis:
+            if key == 'seed':
+                if type(value) is not int:
+                    raise ValueError('sweep grid seed must be an integer')
+            else:
+                candidate = dict(settings)
+                candidate[key] = value
+                _validate_model_settings(candidate, 'model config')
     keys = list(grid)
     development_data = list(documents(development, max_bytes))
     output = Path(output)
@@ -654,7 +669,7 @@ def build_parser():
     evaluation.add_argument('--output', help='optional JSON score file; default: terminal only')
     benchmark = commands.add_parser('benchmark', help='run byte and CoLA benchmarks')
     benchmark.add_argument('checkpoint', help='strict checkpoint; fixed byte suite always runs')
-    benchmark.add_argument('--epochs', type=int, default=1, help='CoLA classifier epochs, default: 1')
+    benchmark.add_argument('--epochs', type=int, default=1, help='positive CoLA classifier epochs, default: 1')
     benchmark.add_argument('--split', type=float, default=0.5, help='contiguous CoLA train fraction, default: 0.5')
     benchmark.add_argument('--cola-data', help='optional four-column CoLA TSV; default: byte suite only')
     benchmark.add_argument('--seed', type=int, default=11, help='model load and CoLA head seed, default: 11')
@@ -665,9 +680,9 @@ def build_parser():
     generation.add_argument('--seed', type=int, default=11, help='sample seed, default: 11')
     generation.add_argument('--bytes', type=int, default=512, help='number of output bytes, default: 512')
     generation.add_argument('--log-every', type=int, default=1000, help='positive progress interval in output bytes, default: 1000')
-    generation.add_argument('--temperature', type=float, help='sampler temperature; default: checkpoint value; zero still samples')
+    generation.add_argument('--temperature', type=float, help='finite nonnegative sampler temperature; effective minimum: 0.1; default: checkpoint value')
     sweeping = commands.add_parser('sweep', help='run a sequential model grid')
-    sweeping.add_argument('--grid', required=True, help='JSON arrays of model values or seed')
+    sweeping.add_argument('--grid', required=True, help='JSON object with nonempty arrays of model values or seed')
     sweeping.add_argument('--data', required=True, help='quoted raw-file train glob')
     sweeping.add_argument('--development', required=True, help='quoted raw-file development glob')
     sweeping.add_argument('--output', required=True, help='sweep folder for run-NNNN and results.jsonl')
@@ -732,9 +747,8 @@ def _main(argv=None):
     elif args.command == 'evaluate':
         evaluate_command(args)
     elif args.command == 'benchmark':
-        model, _ = load_model(args.checkpoint, args.seed)
         from tmt.benchmark import run
-        run(args.checkpoint, args.epochs, args.split, args.cola_data, model=model, seed=args.seed)
+        run(args.checkpoint, args.epochs, args.split, args.cola_data, seed=args.seed)
     elif args.command == 'generate':
         generate(args.checkpoint, args.prompt, args.output, args.seed, args.bytes, args.temperature,
                  args.log_every)

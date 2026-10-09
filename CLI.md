@@ -79,6 +79,8 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 Train and sweep default to `model.json`. An explicit `--config PATH` overrides it for a fresh run.
 The CLI checks config types and limits before model creation. The [command manual](src/tmt/commands.md) lists these limits.
 Evaluation and sweep require a positive `--max-bytes` value. Zero and negative values cause an input error.
+
+Evaluation also needs at least one document with two bytes in the selected input prefix. Empty and one-byte documents provide no targets.
 `--run NAME` creates `runs/NAME/model.safetensors` in a new folder.
 With neither a name nor a checkpoint, train uses a UTC timestamp with microseconds as the run folder name.
 
@@ -158,6 +160,9 @@ Evaluation uses frozen weights, no samples, and the first byte as context. It re
 The default input budget is 8192 bytes across sorted files. Each context window counts input bytes before the target.
 
 Sweep requires a new or empty output folder. It rejects a nonempty folder without changes.
+The grid must be a JSON object. Each field must contain a nonempty array.
+The CLI checks the grid before it creates the output folder.
+
 Sweep appends one row per completed candidate to `results.jsonl`. It selects the lowest development BPB, with the first candidate as tie winner.
 Candidates use `run-NNNN/` folders with `model.safetensors`, `manifest/model.json`, `manifest/run.json`, and `manifest/loss.jsonl`.
 Train sample and evaluation options apply to each candidate.
@@ -166,11 +171,13 @@ The development score at the end of a sweep remains separate.
 
 The byte-only benchmark always uses 393 input bytes, 390 targets, and 104 common targets with windows 1, 8, 32, and 128.
 For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data cola.tsv --epochs 1 --split 0.5`.
+When you set `--cola-data`, `--epochs` must be a positive integer.
 `python -m tmt.benchmark` accepts the same benchmark options.
 CoLA uses four-column TSV rows, a contiguous split, and head-only updates. It reports MCC times 100.
 
 Generation encodes its nonempty prompt as UTF-8 and writes raw bytes without the prompt.
 It prints byte progress at each `--log-every` interval. The default interval is `1000` bytes.
+The `--temperature` override must be finite and nonnegative. The sampler uses a minimum temperature of `0.1`.
 
 Checkpoints require complete model and optimizer tensors plus version-1 model metadata. The loader checks names, shapes, and dtypes.
 Keep output paths apart from input paths. The CLI does not check path collisions or train/development overlap.
