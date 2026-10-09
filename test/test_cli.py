@@ -1,4 +1,11 @@
-import contextlib, inspect, json, math, random, subprocess, sys, tempfile, unittest
+import contextlib
+import inspect
+import json
+import math
+import subprocess
+import sys
+import tempfile
+import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -76,7 +83,8 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertEqual(list(Path(directory).iterdir()), [])
 
     def test_installed_workflow(self):
-        import os, sysconfig
+        import os
+        import sysconfig
         from tmt.cli import load_model
 
         env = dict(os.environ)
@@ -131,7 +139,8 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertIn('390 targets', run('benchmark', str(checkpoint)))
 
     def test_installed_failure_paths(self):
-        import os, sysconfig
+        import os
+        import sysconfig
 
         env = dict(os.environ)
         env.pop('PYTHONPATH', None)

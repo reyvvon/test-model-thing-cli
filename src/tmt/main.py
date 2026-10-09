@@ -26,16 +26,16 @@ class Layer(nn.Module):
         halflives = mx.exp(mx.linspace(0.0, math.log(float(spread)), dim))
         retention = mx.exp(-math.log(2.0) / halflives)
         self.decay = mx.log(retention) - mx.log1p(-retention)
-    
+
         self.states = mx.zeros((dim, ))
         self.decaytrace = mx.zeros((dim, ))
         self.embedtrace = mx.zeros((256, dim))
-        
+
         self.norm = nn.LayerNorm(dim)
         self.weights = nn.Linear(dim, dim, bias = False)
         self.silu = nn.SiLU()
 
-        self.freeze(keys = ['states', 'decaytrace', 'embedtrace'], recurse = False)        
+        self.freeze(keys = ['states', 'decaytrace', 'embedtrace'], recurse = False)
 
     def __call__(self, enc: mx.array, x: mx.array, dummy: mx.array):
         decay = mx.sigmoid(self.decay)
@@ -74,7 +74,7 @@ class Model(nn.Module):
 
         enc = self.encoder(c)
         x = enc
-            
+
         states, decays = [], []
 
         for i, layer in enumerate(self.blocks):

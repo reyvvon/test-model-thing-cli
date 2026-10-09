@@ -1,4 +1,5 @@
-import argparse, math
+import argparse
+import math
 
 import mlx.core as mx
 import mlx.nn as nn
