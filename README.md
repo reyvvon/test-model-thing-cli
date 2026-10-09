@@ -48,7 +48,7 @@ Activation adds `.venv/bin` to PATH for this terminal.
 Developers can use `python -m pip install -e .` so source edits take effect directly.
 For an optional persistent PATH configuration, see [the CLI guide](CLI.md#installation-and-path).
 `python -m tmt` also runs the CLI.
-The version uses installed package metadata. Local and wheel installs normally report `commit unknown`.
+The version uses installed package metadata.
 
 Create a workspace in any folder, then supply raw-byte files:
 

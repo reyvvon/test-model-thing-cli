@@ -4,6 +4,10 @@ from unittest.mock import Mock, patch
 
 
 class CliTests(unittest.TestCase):
+    manifest_fields = {'config', 'seed', 'data_glob', 'data_files', 'updates', 'objective',
+                       'completed_updates', 'resume', 'initial_optimizer_step',
+                       'started_at', 'status', 'last_checkpoint'}
+
     def test_version(self):
         from io import StringIO
         from tmt.cli import main
@@ -92,11 +96,22 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             checkpoint = root / 'runs/first/model.safetensors'
             model, settings = load_model(checkpoint)
             self.assertEqual((settings['dim'], settings['layers'], settings['spread'], model.optimizer.state['step'].item()), (4, 1, 4, 3))
-            run('train', str(checkpoint), '--data', 'data/train/*', '--resume', '--updates', '2')
+            manifest = checkpoint.parent / 'manifest/run.json'
+            fresh = json.loads(manifest.read_text())
+            self.assertEqual((fresh['data_glob'], fresh['data_files'], fresh['updates'], fresh['completed_updates']),
+                             ('data/train/*', [str((root / 'data/train/tiny.bin').resolve())], 3, 3))
+            self.assertEqual((fresh['objective'], fresh['resume'], fresh['initial_optimizer_step']), ('tmt', False, 0))
+            (root / 'data/resume').mkdir()
+            (root / 'data/resume/next.bin').write_bytes(b'wxyz')
+            run('train', str(checkpoint), '--data', 'data/resume/*', '--resume', '--updates', '2', '--seed', '99', '--ce-only')
             self.assertEqual(load_model(checkpoint)[0].optimizer.state['step'].item(), 5)
-            record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
-            self.assertEqual(set(record), {'config', 'seed', 'started_at', 'status', 'last_checkpoint'})
+            record = json.loads(manifest.read_text())
+            self.assertEqual(set(record), self.manifest_fields)
             self.assertEqual((record['status'], record['config'], record['last_checkpoint']), ('complete', settings, str(checkpoint.resolve())))
+            self.assertEqual((record['data_glob'], record['data_files'], record['updates'], record['completed_updates']),
+                             ('data/resume/*', [str((root / 'data/resume/next.bin').resolve())], 2, 2))
+            self.assertEqual((record['seed'], record['objective'], record['resume'], record['initial_optimizer_step']),
+                             (99, 'ce_only', True, 3))
             run('evaluate', str(checkpoint), '--data', 'data/train/*', '--windows', '1', '2', '--output', 'score.json')
             self.assertEqual(json.loads((root / 'score.json').read_text())['targets'], 3)
             run('generate', str(checkpoint), '--prompt', 'The ', '--output', 'sample.bin', '--bytes', '4')
@@ -148,6 +163,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             run('train', '--data', 'short.bin', '--run', 'no-targets', '--updates', '1')
             record = json.loads((root / 'runs/no-targets/manifest/run.json').read_text())
             self.assertEqual((record['status'], record['last_checkpoint']), ('failed', None))
+            self.assertEqual((record['updates'], record['completed_updates'], record['initial_optimizer_step']), (1, 0, 0))
             result = run('evaluate', str(checkpoint), '--data', 'short.bin')
             self.assertIn('at least one target', result.stderr)
 
@@ -166,6 +182,13 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertTrue(all(Path(name).is_dir() for name in ('data/train', 'data/dev', 'runs')))
             self.assertEqual(json.loads(Path('grid.json').read_text()),
                              {'dim': [4, 8], 'layers': [1], 'spread': [4], 'seed': [11, 22]})
+            template = json.loads(Path('run.example.json').read_text())
+            self.assertEqual(set(template), self.manifest_fields)
+            self.assertEqual((template['config'], template['seed'], template['data_glob'], template['data_files']),
+                             (saved, 11, 'data/train/*', []))
+            self.assertEqual((template['updates'], template['objective'], template['completed_updates']), (1000, 'tmt', 0))
+            self.assertEqual((template['resume'], template['initial_optimizer_step'], template['started_at'], template['last_checkpoint']),
+                             (False, 0, None, None))
 
             explicit = Path(directory) / 'custom' / 'settings.json'
             main(['init', '--output', str(explicit)])
@@ -269,6 +292,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
     def test_manifest(self):
         from datetime import datetime, timezone
         from tmt.cli import train
+        from tmt.main import Model
 
         original_dump, records = json.dump, []
 
@@ -276,21 +300,82 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             records.append(dict(record))
             return original_dump(record, *args, **kwargs)
 
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            data = root / 'train.bin'
-            data.write_bytes(b'abc\n')
-            checkpoint = root / 'run' / 'model.safetensors'
-            with patch('tmt.cli.json.dump', side_effect=capture) as writes:
-                train(self._tiny_settings(), checkpoint, str(data), 3, 11)
+        train_step = Model.train_step
+        for ce_only in (False, True):
+            with self.subTest(ce_only=ce_only), tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):
+                root = Path(directory).resolve()
+                Path('data').mkdir()
+                paths, calls = {}, []
+                for name, content in (('a.bin', b'ab'), ('b.bin', b'cd'), ('c.bin', b'ef')):
+                    data = root / 'data' / name
+                    data.write_bytes(content)
+                    paths[content[0]] = str(data)
 
-            self.assertEqual(writes.call_count, 2)
-            self.assertEqual(set(records[0]), {'config', 'seed', 'started_at', 'status', 'last_checkpoint'})
-            self.assertEqual([(record['status'], record['last_checkpoint']) for record in records],
-                             [('running', None), ('complete', str(checkpoint.resolve()))])
-            self.assertEqual(datetime.fromisoformat(records[0]['started_at']).utcoffset(), timezone.utc.utcoffset(None))
-            self.assertEqual(json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text()), records[1])
-            self.assertTrue(checkpoint.is_file())
+                def record_train(model, current, target, end, objective=False):
+                    calls.append((paths[current], objective))
+                    return train_step(model, current, target, end, objective)
+
+                checkpoint = root / 'run' / 'model.safetensors'
+                records.clear()
+                with (patch('tmt.cli.json.dump', side_effect=capture) as writes,
+                      patch.object(Model, 'train_step', record_train)):
+                    train(self._tiny_settings(), checkpoint, 'data/*.bin', 4, 11, ce_only)
+
+                self.assertEqual(writes.call_count, 2)
+                self.assertEqual(set(records[0]), self.manifest_fields)
+                for record in records:
+                    self.assertEqual((record['config'], record['seed'], record['data_glob']), (self._tiny_settings(), 11, 'data/*.bin'))
+                    self.assertEqual(set(record['data_files']), set(paths.values()))
+                    self.assertEqual(record['data_files'], [path for path, _ in calls[:3]])
+                    self.assertEqual((record['updates'], record['objective'], record['resume'], record['initial_optimizer_step']),
+                                     (4, 'ce_only' if ce_only else 'tmt', False, 0))
+                self.assertEqual(calls, [(path, ce_only) for path in records[0]['data_files'] + records[0]['data_files'][:1]])
+                self.assertEqual([(record['status'], record['completed_updates'], record['last_checkpoint']) for record in records],
+                                 [('running', 0, None), ('complete', 4, str(checkpoint.resolve()))])
+                self.assertEqual(datetime.fromisoformat(records[0]['started_at']).utcoffset(), timezone.utc.utcoffset(None))
+                self.assertEqual(json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text()), records[1])
+                self.assertTrue(checkpoint.is_file())
+
+    def test_manifest_partial_progress(self):
+        from tmt.cli import train
+        from tmt.main import Model
+
+        train_step = Model.train_step
+        for error_type, status in ((OSError, 'failed'), (KeyboardInterrupt, 'interrupted')):
+            for resume in (False, True):
+                with self.subTest(status=status, resume=resume), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    data = root / 'train.bin'
+                    data.write_bytes(b'abcdef')
+                    checkpoint = root / 'run' / 'model.safetensors'
+                    original = None
+                    if resume:
+                        train(self._tiny_settings(), checkpoint, str(data), 2, 11)
+                        original = checkpoint.read_bytes()
+                    completed = 0
+
+                    def fail(model, current, target, end, ce_only=False):
+                        nonlocal completed
+                        if completed == 1:
+                            raise error_type('injected update failure')
+                        result = train_step(model, current, target, end, ce_only)
+                        completed += 1
+                        return result
+
+                    with patch.object(Model, 'train_step', fail), self.assertRaises(error_type):
+                        train(None if resume else self._tiny_settings(), checkpoint, str(data), 3, 17, True, resume)
+
+                    record = json.loads((checkpoint.parent / 'manifest/run.json').read_text())
+                    self.assertEqual(set(record), self.manifest_fields)
+                    self.assertEqual((record['data_glob'], record['data_files'], record['updates'], record['completed_updates']),
+                                     (str(data), [str(data.resolve())], 3, 1))
+                    self.assertEqual((record['status'], record['seed'], record['objective'], record['resume'], record['initial_optimizer_step']),
+                                     (status, 17, 'ce_only', resume, 2 if resume else 0))
+                    self.assertEqual(record['last_checkpoint'], str(checkpoint.resolve()) if resume else None)
+                    if resume:
+                        self.assertEqual(checkpoint.read_bytes(), original)
+                    else:
+                        self.assertFalse(checkpoint.exists())
 
     def test_evaluate(self):
         import mlx.core as mx
@@ -475,23 +560,31 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             train, development = root / 'train.bin', root / 'development.bin'
             train.write_bytes(b'\x00\x01\x02')
             development.write_bytes(b'\xf0\xf1\xf2\xf3')
-            output, stdout = root / 'runs', StringIO()
-            with contextlib.redirect_stdout(stdout):
-                best = sweep(grid, str(train), str(development), output, config, 2, 11, max_bytes=4)
-            rows = [json.loads(line) for line in (output / 'results.jsonl').read_text().splitlines()]
-            self.assertEqual([(row['settings']['dim'], row['seed']) for row in rows], [(4, 11), (4, 22), (8, 11), (8, 22)])
-            self.assertEqual(best, min(rows, key=lambda row: row['development_bpb']))
-            self.assertIn(json.dumps(best), stdout.getvalue())
-            for index, row in enumerate(rows, 1):
-                checkpoint = Path(row['checkpoint'])
-                self.assertEqual((row['objective'], row['development_targets']), ('tmt', 3))
-                self.assertEqual(json.loads((checkpoint.parent / 'manifest' / 'model.json').read_text()), row['settings'])
-                manifest = json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text())
-                self.assertEqual((set(manifest), manifest['status'], manifest['last_checkpoint']), ({'config', 'seed', 'started_at', 'status', 'last_checkpoint'}, 'complete', str(checkpoint.resolve())))
-                model, settings = load_model(checkpoint, row['seed'])
-                self.assertEqual(settings, row['settings'])
-                self.assertEqual(int(model.optimizer.state['step'].item()), 2)
-                self.assertEqual(checkpoint.parent.name, f'run-{index:04d}')
+            for ce_only in (False, True):
+                with self.subTest(ce_only=ce_only):
+                    output, stdout = root / ('runs-ce' if ce_only else 'runs'), StringIO()
+                    with contextlib.redirect_stdout(stdout):
+                        best = sweep(grid, str(train), str(development), output, config, 2, 11, ce_only, max_bytes=4)
+                    rows = [json.loads(line) for line in (output / 'results.jsonl').read_text().splitlines()]
+                    self.assertEqual([(row['settings']['dim'], row['seed']) for row in rows], [(4, 11), (4, 22), (8, 11), (8, 22)])
+                    self.assertEqual(best, min(rows, key=lambda row: row['development_bpb']))
+                    self.assertIn(json.dumps(best), stdout.getvalue())
+                    for index, row in enumerate(rows, 1):
+                        checkpoint = Path(row['checkpoint'])
+                        self.assertEqual((row['objective'], row['development_targets']), ('ce_only' if ce_only else 'tmt', 3))
+                        self.assertEqual(json.loads((checkpoint.parent / 'manifest' / 'model.json').read_text()), row['settings'])
+                        manifest = json.loads((checkpoint.parent / 'manifest' / 'run.json').read_text())
+                        self.assertEqual((set(manifest), manifest['status'], manifest['last_checkpoint']),
+                                         (self.manifest_fields, 'complete', str(checkpoint.resolve())))
+                        self.assertEqual(manifest['config'], row['settings'])
+                        for field in ('seed', 'updates', 'objective', 'data_glob'):
+                            self.assertEqual(manifest[field], row[field])
+                        self.assertEqual((manifest['data_files'], manifest['completed_updates'], manifest['resume'], manifest['initial_optimizer_step']),
+                                         ([str(train.resolve())], row['updates'], False, 0))
+                        model, settings = load_model(checkpoint, row['seed'])
+                        self.assertEqual(settings, row['settings'])
+                        self.assertEqual(int(model.optimizer.state['step'].item()), 2)
+                        self.assertEqual(checkpoint.parent.name, f'run-{index:04d}')
 
     def test_checkpoint_header(self):
         from tmt.cli import load_model

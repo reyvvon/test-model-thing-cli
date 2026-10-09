@@ -87,8 +87,19 @@ Resume restores model and optimizer tensors, then adds the requested updates wit
 It resets internal state and RTU traces at the first document. It does not restore the file cursor or RNG state.
 
 The trainer writes `manifest/run.json` beside the checkpoint at start and exit only.
-Its five fields are `config`, `seed`, `started_at`, `status`, and `last_checkpoint`.
+The record contains model `config`, invocation `seed`, UTC `started_at`, `status`, and `last_checkpoint`.
 Status is `running`, `complete`, `failed`, or `interrupted`. A resume replaces the record for the invocation.
+
+The record also contains `data_glob`, absolute `data_files` in shuffled pass order, requested `updates`, and `objective`.
+The objective is `tmt` for the full loss or `ce_only` for next-byte cross entropy.
+The file list includes all matched paths. The update budget can stop a pass before the trainer reads every file.
+Paths identify the file selection but do not prove that file contents stay the same.
+
+`resume` identifies a resume invocation. `initial_optimizer_step` is the saved optimizer step at resume start, or zero for a fresh run.
+`updates` is the budget for this invocation, with additional updates on resume.
+`completed_updates` is zero at start and counts completed updates at exit, after success, failure, or interrupt.
+This count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
+See the [manifest fields](src/tmt/commands.md#train) for details.
 
 The trainer saves every 500 updates and at normal completion. It prints save feedback only after success.
 Ctrl-C does not save. Keep the last successful checkpoint. Direct writes can leave partial files after a process failure.

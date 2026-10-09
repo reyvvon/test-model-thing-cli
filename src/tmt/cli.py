@@ -241,6 +241,13 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
     record = {
         'config': settings,
         'seed': seed,
+        'data_glob': pattern,
+        'data_files': [str(Path(filename).resolve()) for filename in files],
+        'updates': updates,
+        'objective': 'ce_only' if ce_only else 'tmt',
+        'completed_updates': 0,
+        'resume': resume,
+        'initial_optimizer_step': int(model.optimizer.state['step'].item()) if resume else 0,
         'started_at': datetime.now(timezone.utc).isoformat(),
         'status': 'running',
         'last_checkpoint': str(checkpoint.resolve()) if resume else None,
@@ -293,6 +300,7 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
         raise
     finally:
         record['status'] = status
+        record['completed_updates'] = completed
         _write_manifest(manifest, record)
 
     loss = 'none' if last_loss is None else f'{float(last_loss.item()):.6f}'
@@ -407,7 +415,10 @@ def init_config(path=None):
     templates = {path: settings} if path is not None else {
         'model.json': settings,
         'grid.json': {'dim': [4, 8], 'layers': [1], 'spread': [4], 'seed': [11, 22]},
-        'run.example.json': {'config': settings, 'seed': 11, 'started_at': None,
+        'run.example.json': {'config': settings, 'seed': 11,
+                             'data_glob': 'data/train/*', 'data_files': [],
+                             'updates': 1000, 'objective': 'tmt', 'completed_updates': 0,
+                             'resume': False, 'initial_optimizer_step': 0, 'started_at': None,
                              'status': 'running', 'last_checkpoint': None},
     }
     for destination, value in templates.items():

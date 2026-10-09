@@ -36,7 +36,7 @@ tmt init --output configs/model.json
 ### Behavior and files
 Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults. Edit it before a real experiment.
 
-`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, and `seed=[11,22]`. `run.example.json` shows the five manifest fields. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
+`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list and a null timestamp. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
 
 The `--output` form creates parent folders as needed. It writes only the model config and does not create workspace folders.
 
@@ -78,7 +78,24 @@ The CLI sorts matched paths and shuffles them once from `--seed`. It repeats tha
 
 A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. An unmatched data glob fails before the CLI creates that folder.
 
-A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder. The five fields are `config` (model settings), `seed`, `started_at` (UTC time), `status`, and `last_checkpoint`. Status is `running`, `complete`, `interrupted`, or `failed`.
+A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder.
+
+| Field | Meaning |
+| --- | --- |
+| `config` | Complete model settings for this invocation. Resume uses checkpoint settings. |
+| `seed` | Python and MLX seed for this invocation. |
+| `data_glob` | The train glob as supplied. Relative globs use the invocation directory. |
+| `data_files` | All matched absolute paths, in the shuffled order for each data pass. |
+| `updates` | Requested target-byte optimizer updates for this invocation. Resume adds this budget to the saved optimizer step. |
+| `objective` | `tmt` for the full TMT loss, or `ce_only` for next-byte cross entropy. |
+| `completed_updates` | Zero at start. Completed updates in this invocation at exit, after success, failure, or interrupt. |
+| `resume` | `true` for resume, or `false` for a fresh run. |
+| `initial_optimizer_step` | The saved optimizer step at resume start, or zero for a fresh run. |
+| `started_at` | Invocation start time in UTC. |
+| `status` | `running`, `complete`, `interrupted`, or `failed`. |
+| `last_checkpoint` | Absolute path of the last successful checkpoint, or null before a fresh run saves. |
+
+The file list records selection and pass order. The update budget can stop a pass before the trainer reads every file. Paths do not prove that file contents stay the same. The completed update count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
 
 The command writes the manifest at start and exit. The checkpoint contains model and optimizer tensors. The loader checks metadata, tensor names, shapes, and types before restore.
 
@@ -122,7 +139,7 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 ### Behavior and files
 The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
 
-Each candidate config is `run-NNNN/manifest/model.json`. Its five-field run record is `run-NNNN/manifest/run.json`. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
 
 At the end, the command prints the row with the lowest development BPB. The first candidate wins a tie. The command does not write a separate best-model file.
 
