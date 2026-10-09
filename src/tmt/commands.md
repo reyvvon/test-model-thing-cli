@@ -90,7 +90,7 @@ tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 
 ### Behavior and files
 The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets internal state and RTU traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
 
-A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. An unmatched data glob fails before the CLI creates that folder.
+A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. The command checks train and evaluation selections before folder creation. Unmatched globs and unreadable files cause an input error. Correct the input and retry with the same run name.
 
 A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder.
 
@@ -209,6 +209,10 @@ At the end, the command prints the row with the lowest development BPB. The firs
 
 Use a new or empty output folder for each sweep. The command rejects a nonempty folder to preserve checkpoints and result rows.
 
+The command checks train, evaluation, and development selections before output creation. An input error leaves no new output folder. Correct the input and retry with the same output path.
+
+After execution starts, `sweep.json` records the settings, grid, data selections, status, current candidate, and completed result count. It also records the error type and message after a failure or interrupt. Completed rows remain in `results.jsonl`. To retry after an execution failure, use a new output path. The command does not resume a partial sweep.
+
 ## evaluate
 
 Measure next-byte prediction on raw-byte documents with frozen model weights.
@@ -257,7 +261,7 @@ python -m tmt.benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRAC
 ### Requirements and options
 
 - `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
-- `--cola-data PATH` selects a local four-column CoLA TSV. Without it, the command runs only the byte suite.
+- `--cola-data PATH` selects a local four-column CoLA TSV. Labels must be `0` or `1`. The command rejects an invalid label with its TSV row number before model load or byte evaluation. Without this option, the command runs only the byte suite.
 - `--epochs N` sets CoLA head epochs. The default is `1`. When you set `--cola-data`, the value must be a positive integer. Epoch count does not change the fixed byte suite.
 - `--split FRACTION` sets the contiguous CoLA train fraction. The default is `0.5`.
 - `--seed N` sets the checkpoint load and CoLA head seed. The default is `11`.

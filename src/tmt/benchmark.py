@@ -31,9 +31,20 @@ def cola(filepath: str):
     data = []
 
     with open(filepath, 'r', encoding = 'utf-8') as f:
-        for line in f:
+        for row_number, line in enumerate(f, start=1):
             parts = line.strip().split('\t')
-            if len(parts) == 4: data.append((parts[3].encode('utf-8'), int(parts[1])))
+            if len(parts) == 4:
+                try:
+                    label = int(parts[1])
+                except ValueError as error:
+                    raise ValueError(
+                        f'CoLA TSV row {row_number} has invalid label {parts[1]!r}; expected 0 or 1.'
+                    ) from error
+                if label not in (0, 1):
+                    raise ValueError(
+                        f'CoLA TSV row {row_number} has invalid label {parts[1]!r}; expected 0 or 1.'
+                    )
+                data.append((parts[3].encode('utf-8'), label))
 
     return data
 
@@ -164,8 +175,17 @@ def benchmark(model: Model, data: list, train: bool, head: Classification, optim
 def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None, *, model=None, seed=11):
     from tmt.cli import _validate_seed
     _validate_seed(seed)
+
+    rows = None
     if data is not None and epochs < 1:
         raise ValueError('epochs must be positive with cola-data')
+    if data is not None:
+        rows = cola(data)
+        if rows == [] or len(rows) < 2:
+            raise FileNotFoundError(
+                f'CoLA TSV {data!r} must contain at least two valid four-column rows.'
+            )
+
     if model is None:
         from tmt.cli import load_model
         model, _ = load_model(path, seed)
@@ -178,12 +198,6 @@ def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None,
 
     if data is None:
         return {'byte_scores': byte_scores, 'epochs': []}
-
-    rows = cola(data)
-    if rows == [] or len(rows) < 2:
-        raise FileNotFoundError(
-            f'CoLA TSV {data!r} must contain at least two valid four-column rows.'
-        )
 
     split = int(len(rows) * (min(max(split, 0.0), 1.0)))
     train, held = rows[:split], rows[split:]

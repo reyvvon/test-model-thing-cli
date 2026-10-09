@@ -486,6 +486,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 Path('model.json').write_text(json.dumps(self._tiny_settings()))
                 main(['train', '--data', str(data), '--run', 'named', '--updates', '3'])
                 self.assertEqual(command.call_args.args[:2], (self._tiny_settings(), Path('runs/named/model.safetensors')))
+                Path('runs/named').mkdir(parents=True)  # The mock replaces folder creation in train.
                 main(['train', '--data', str(data)])
                 self.assertEqual(command.call_args.args[1].parent.parent, Path('runs'))
                 with self.assertRaises(SystemExit) as exit: main(['train', '--data', str(data), '--run', 'named'])
@@ -887,6 +888,81 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                         else:
                             self.assertFalse(output.exists())
             train.assert_not_called()
+
+    def test_input_failures_allow_retry(self):
+        from io import StringIO
+        from tmt.cli import main, train
+
+        with tempfile.TemporaryDirectory() as directory, contextlib.chdir(directory):
+            root = Path(directory)
+            Path('model.json').write_text(json.dumps(self._tiny_settings()))
+            Path('grid.json').write_text('{"seed": [11]}')
+            Path('train.bin').write_bytes(b'ab')
+            Path('dev.bin').write_bytes(b'cd')
+            Path('not-a-file').mkdir()
+            for selection in ('absent/*', 'not-a-file'):
+                for role in ('train', 'evaluation'):
+                    args = ['train', '--data', selection if role == 'train' else 'train.bin',
+                            '--run', 'retry', '--updates', '1']
+                    if role == 'evaluation':
+                        args += ['--eval-data', selection, '--eval-every', '1']
+                    with self.subTest(command='train', role=role, selection=selection):
+                        with contextlib.redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit:
+                            main(args)
+                        self.assertEqual(exit.exception.code, 1)
+                        self.assertFalse(Path('runs/retry').exists())
+                for role in ('train', 'evaluation', 'development'):
+                    args = ['sweep', '--grid', 'grid.json',
+                            '--data', selection if role == 'train' else 'train.bin',
+                            '--development', selection if role == 'development' else 'dev.bin',
+                            '--output', 'retry-sweep', '--updates', '1']
+                    if role == 'evaluation':
+                        args += ['--eval-data', selection, '--eval-every', '1']
+                    with self.subTest(command='sweep', role=role, selection=selection):
+                        with contextlib.redirect_stderr(StringIO()), self.assertRaises(SystemExit) as exit:
+                            main(args)
+                        self.assertEqual(exit.exception.code, 1)
+                        self.assertFalse(Path('retry-sweep').exists())
+            with patch('tmt.cli.new_model') as model:
+                with self.assertRaises(FileNotFoundError):
+                    train(self._tiny_settings(), root / 'direct/model.safetensors',
+                          'train.bin', updates=1, eval_data='absent/*', eval_every=1)
+                model.assert_not_called()
+                self.assertFalse((root / 'direct').exists())
+            with contextlib.redirect_stdout(StringIO()):
+                main(['train', '--data', 'train.bin', '--run', 'retry', '--updates', '1'])
+                main(['sweep', '--grid', 'grid.json', '--data', 'train.bin',
+                      '--development', 'dev.bin', '--output', 'retry-sweep', '--updates', '1'])
+            self.assertEqual(json.loads(Path('runs/retry/manifest/run.json').read_text())['status'], 'complete')
+            record = json.loads(Path('retry-sweep/sweep.json').read_text())
+            self.assertEqual((record['status'], record['completed_runs'], record['error']), ('complete', 1, None))
+
+    def test_sweep_records_execution_failure_and_preserves_results(self):
+        from io import StringIO
+        from tmt.cli import sweep
+
+        for error_type, status in ((OSError, 'failed'), (KeyboardInterrupt, 'interrupted')):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                config, grid, data = root / 'model.json', root / 'grid.json', root / 'data.bin'
+                config.write_text(json.dumps(self._tiny_settings()))
+                grid.write_text('{"seed": [11, 22]}')
+                data.write_bytes(b'ab')
+                output = root / 'sweep'
+                with (patch('tmt.cli.train', side_effect=[Mock(), error_type('injected failure')]),
+                      patch('tmt.benchmark.evaluate', return_value={'targets': 1, 'bpb': 8.0}),
+                      self.assertRaises(error_type)):
+                    sweep(grid, str(data), str(data), output, config, updates=1)
+                record = json.loads((output / 'sweep.json').read_text())
+                self.assertEqual((record['status'], record['current_run'], record['completed_runs']), (status, 2, 1))
+                self.assertEqual(record['error'], {'type': error_type.__name__, 'message': 'injected failure'})
+                rows = (output / 'results.jsonl').read_bytes()
+                with self.assertRaisesRegex(FileExistsError, 'choose a new output folder'):
+                    sweep(grid, str(data), str(data), output, config, updates=1)
+                self.assertEqual((output / 'results.jsonl').read_bytes(), rows)
+                with contextlib.redirect_stdout(StringIO()):
+                    sweep(grid, str(data), str(data), root / 'retry', config, updates=1)
+                self.assertEqual(json.loads((root / 'retry/sweep.json').read_text())['status'], 'complete')
 
     def test_sweep(self):
         from io import StringIO

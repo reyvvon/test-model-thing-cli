@@ -204,11 +204,20 @@ def load_model(path, seed=11):
     return model, settings
 
 
-def documents(pattern, max_bytes=None):
-    """Yield sorted raw files with an optional prefix across all file bytes."""
+def _input_files(pattern):
+    """Resolve a selection and check that every selected file is readable."""
     files = sorted(glob.glob(pattern, recursive=True))
     if not files:
         raise FileNotFoundError(f'no files matched {pattern!r}')
+    for filename in files:
+        with open(filename, 'rb') as file:
+            file.read(1)
+    return files
+
+
+def documents(pattern, max_bytes=None):
+    """Yield sorted raw files with an optional prefix across all file bytes."""
+    files = _input_files(pattern)
     remaining = max_bytes
     for path in files:
         if remaining == 0:
@@ -292,7 +301,8 @@ def _training_sample(model, prompt, count, seed):
 
 def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=False,
           log_every=100, sample_every=None, sample_prompt='The ', sample_seed=11,
-          sample_bytes=256, eval_data=None, eval_every=None, eval_max_bytes=8192):
+          sample_bytes=256, eval_data=None, eval_every=None, eval_max_bytes=8192,
+          *, new_run=False):
     """Train on adjacent raw-byte pairs and record the run manifest."""
     _validate_seed(seed)
     _validate_seed(sample_seed, 'sample-seed')
@@ -302,9 +312,7 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
                          eval_every, eval_max_bytes)
     import mlx.core as mx
 
-    files = sorted(glob.glob(pattern, recursive=True))
-    if not files:
-        raise FileNotFoundError(f'no files matched {pattern!r}')
+    files = _input_files(pattern)
     evaluation_data = None if eval_data is None else list(documents(eval_data, eval_max_bytes))
     if resume:
         model, settings = load_model(path, seed)
@@ -313,7 +321,7 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
     random.shuffle(files)
 
     checkpoint = Path(path)
-    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.parent.mkdir(parents=True, exist_ok=not new_run)
     manifest_dir = checkpoint.parent / 'manifest'
     manifest_dir.mkdir(parents=True, exist_ok=True)
     manifest = manifest_dir / 'run.json'
@@ -553,6 +561,9 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
                 candidate[key] = value
                 _validate_model_settings(candidate, 'model config')
     keys = list(grid)
+    _input_files(pattern)
+    if eval_data is not None:
+        list(documents(eval_data, eval_max_bytes))
     development_data = list(documents(development, max_bytes))
     output = Path(output)
     if output.exists() and any(output.iterdir()):
@@ -563,42 +574,67 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
     results_path = output / 'results.jsonl'
     rows = []
 
-    for index, values in enumerate(itertools.product(*(grid[key] for key in keys)), 1):
-        overrides = dict(zip(keys, values))
-        run_seed = overrides.pop('seed', seed)
-        run_settings = dict(settings)
-        run_settings.update(overrides)
-        _validate_model_settings(run_settings, 'model config')
-        run_path = output / f'run-{index:04d}'
-        run_path.mkdir(parents=True, exist_ok=True)
-        manifest_dir = run_path / 'manifest'
-        manifest_dir.mkdir(parents=True, exist_ok=True)
-        with open(manifest_dir / 'model.json', 'w') as file:
-            json.dump(run_settings, file, indent=2)
-            file.write('\n')
-        checkpoint = run_path / 'model.safetensors'
-        model = train(run_settings, checkpoint, pattern, updates, run_seed,
-                      ce_only, resume=False, log_every=log_every,
-                      sample_every=sample_every, sample_prompt=sample_prompt,
-                      sample_seed=sample_seed, sample_bytes=sample_bytes,
-                      eval_data=eval_data, eval_every=eval_every, eval_max_bytes=eval_max_bytes)
-        score = evaluate(model, development_data)
-        row = {
-            'run': index,
-            'settings': run_settings,
-            'seed': run_seed,
-            'updates': updates,
-            'objective': 'ce_only' if ce_only else 'tmt',
-            'data_glob': pattern,
-            'development_glob': development,
-            'development_max_bytes': max_bytes,
-            'development_targets': score['targets'],
-            'development_bpb': score['bpb'],
-            'checkpoint': str(checkpoint.resolve()),
-        }
-        with open(results_path, 'a') as file:
-            file.write(json.dumps(row) + '\n')
-        rows.append(row)
+    sweep_manifest = output / 'sweep.json'
+    record = {
+        'config': settings, 'grid': grid, 'seed': seed, 'updates': updates,
+        'objective': 'ce_only' if ce_only else 'tmt',
+        'data_glob': pattern, 'development_glob': development,
+        'development_max_bytes': max_bytes,
+        'log_every': log_every, 'sample_every': sample_every,
+        'sample_prompt': sample_prompt, 'sample_seed': sample_seed,
+        'sample_bytes': sample_bytes, 'eval_data': eval_data,
+        'eval_every': eval_every, 'eval_max_bytes': eval_max_bytes,
+        'started_at': datetime.now(timezone.utc).isoformat(),
+        'status': 'running', 'completed_runs': 0, 'current_run': None, 'error': None,
+    }
+    _write_manifest(sweep_manifest, record)
+    try:
+        for index, values in enumerate(itertools.product(*(grid[key] for key in keys)), 1):
+            record['current_run'] = index
+            overrides = dict(zip(keys, values))
+            run_seed = overrides.pop('seed', seed)
+            run_settings = dict(settings)
+            run_settings.update(overrides)
+            _validate_model_settings(run_settings, 'model config')
+            run_path = output / f'run-{index:04d}'
+            run_path.mkdir(parents=True, exist_ok=True)
+            manifest_dir = run_path / 'manifest'
+            manifest_dir.mkdir(parents=True, exist_ok=True)
+            with open(manifest_dir / 'model.json', 'w') as file:
+                json.dump(run_settings, file, indent=2)
+                file.write('\n')
+            checkpoint = run_path / 'model.safetensors'
+            model = train(run_settings, checkpoint, pattern, updates, run_seed,
+                          ce_only, resume=False, log_every=log_every,
+                          sample_every=sample_every, sample_prompt=sample_prompt,
+                          sample_seed=sample_seed, sample_bytes=sample_bytes,
+                          eval_data=eval_data, eval_every=eval_every, eval_max_bytes=eval_max_bytes)
+            score = evaluate(model, development_data)
+            row = {
+                'run': index,
+                'settings': run_settings,
+                'seed': run_seed,
+                'updates': updates,
+                'objective': 'ce_only' if ce_only else 'tmt',
+                'data_glob': pattern,
+                'development_glob': development,
+                'development_max_bytes': max_bytes,
+                'development_targets': score['targets'],
+                'development_bpb': score['bpb'],
+                'checkpoint': str(checkpoint.resolve()),
+            }
+            with open(results_path, 'a') as file:
+                file.write(json.dumps(row) + '\n')
+            rows.append(row)
+            record['completed_runs'] = len(rows)
+            _write_manifest(sweep_manifest, record)
+        record['status'] = 'complete'
+    except (Exception, KeyboardInterrupt) as error:
+        record['status'] = 'interrupted' if isinstance(error, KeyboardInterrupt) else 'failed'
+        record['error'] = {'type': type(error).__name__, 'message': str(error)}
+        raise
+    finally:
+        _write_manifest(sweep_manifest, record)
 
     best = min(rows, key=lambda row: row['development_bpb'])
     print(f'best row: {json.dumps(best)}')
@@ -761,13 +797,15 @@ def _main(argv=None):
         if not glob.glob(args.data, recursive=True):
             raise FileNotFoundError(f'no files matched {args.data!r}')
         settings = None if args.resume else load_config(args.config or 'model.json')
-        if args.checkpoint is None:
+        new_run = args.checkpoint is None
+        if new_run:
             name = args.run or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
             folder = Path('runs') / name
-            folder.mkdir(parents=True, exist_ok=False)
+            if folder.exists():
+                raise FileExistsError(f'run folder {folder} already exists; choose a new run name')
             args.checkpoint = folder / 'model.safetensors'
         train(settings, args.checkpoint, args.data, args.updates, args.seed, args.ce_only, args.resume,
-              args.log_every, **monitoring)
+              args.log_every, new_run=new_run, **monitoring)
     elif args.command == 'evaluate':
         evaluate_command(args)
     elif args.command == 'benchmark':

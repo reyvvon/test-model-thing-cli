@@ -177,6 +177,7 @@ For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data c
 When you set `--cola-data`, `--epochs` must be a positive integer.
 `python -m tmt.benchmark` accepts the same benchmark options.
 CoLA uses four-column TSV rows, a contiguous split, and head-only updates. It reports MCC times 100.
+Each label must be `0` or `1`. An invalid label causes an error with its TSV row number before model load or byte evaluation.
 
 Generation encodes its nonempty prompt as UTF-8 and writes raw bytes without the prompt.
 It prints byte progress at each `--log-every` interval. The default interval is `1000` bytes.
@@ -192,4 +193,8 @@ Whole-file reads can require memory equal to the largest file.
 Keep objective loss, frozen BPB, and CoLA MCC separate. Tiny fixtures do not establish general model quality.
 
 File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
-An unmatched train glob fails before the CLI creates a named or timestamp run folder.
+Train checks train and evaluation selections before it creates a named or timestamp run folder.
+Sweep checks train, evaluation, and development selections before output creation.
+Unmatched globs and unreadable files cause an input error. Correct the input and retry with the same output path.
+After sweep execution starts, `sweep.json` records status, progress, and any failure or interrupt error.
+For a retry after an execution failure, use a new sweep output path. The command preserves partial results and checkpoints.
