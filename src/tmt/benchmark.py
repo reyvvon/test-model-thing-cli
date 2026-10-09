@@ -32,19 +32,26 @@ def cola(filepath: str):
 
     with open(filepath, 'r', encoding = 'utf-8') as f:
         for row_number, line in enumerate(f, start=1):
-            parts = line.strip().split('\t')
-            if len(parts) == 4:
-                try:
-                    label = int(parts[1])
-                except ValueError as error:
-                    raise ValueError(
-                        f'CoLA TSV row {row_number} has invalid label {parts[1]!r}; expected 0 or 1.'
-                    ) from error
-                if label not in (0, 1):
-                    raise ValueError(
-                        f'CoLA TSV row {row_number} has invalid label {parts[1]!r}; expected 0 or 1.'
-                    )
-                data.append((parts[3].encode('utf-8'), label))
+            if not line.strip():
+                continue
+            parts = line.rstrip('\r\n').split('\t')
+            if len(parts) != 4:
+                raise ValueError(
+                    f'CoLA TSV row {row_number} has {len(parts)} columns; expected 4.'
+                )
+            try:
+                label = int(parts[1])
+            except ValueError as error:
+                raise ValueError(
+                    f'CoLA TSV row {row_number} has invalid label {parts[1]!r}; expected 0 or 1.'
+                ) from error
+            if label not in (0, 1):
+                raise ValueError(
+                    f'CoLA TSV row {row_number} has invalid label {parts[1]!r}; expected 0 or 1.'
+                )
+            if not parts[3].strip():
+                raise ValueError(f'CoLA TSV row {row_number} has an empty sentence.')
+            data.append((parts[3].encode('utf-8'), label))
 
     return data
 

@@ -175,6 +175,7 @@ The development score at the end of a sweep remains separate.
 The byte-only benchmark always uses 393 input bytes, 390 targets, and 104 common targets with windows 1, 8, 32, and 128.
 For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data cola.tsv --epochs 1 --split 0.5`.
 When you set `--cola-data`, `--epochs` must be a positive integer.
+Each nonblank CoLA row must have exactly four columns, a binary label, and a nonblank sentence. Invalid rows produce a row-numbered error before model load or byte evaluation. The loader ignores blank lines and preserves sentence whitespace.
 `python -m tmt.benchmark` accepts the same benchmark options.
 CoLA uses four-column TSV rows, a contiguous split, and head-only updates. It reports MCC times 100.
 Each label must be `0` or `1`. An invalid label causes an error with its TSV row number before model load or byte evaluation.

@@ -261,7 +261,7 @@ python -m tmt.benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRAC
 ### Requirements and options
 
 - `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
-- `--cola-data PATH` selects a local four-column CoLA TSV. Labels must be `0` or `1`. The command rejects an invalid label with its TSV row number before model load or byte evaluation. Without this option, the command runs only the byte suite.
+- `--cola-data PATH` selects a local four-column CoLA TSV. Labels must be `0` or `1`. Each nonblank row must have exactly four columns and a sentence with at least one non-whitespace character. The command rejects an invalid row with its TSV row number before model load or byte evaluation. Without this option, the command runs only the byte suite.
 - `--epochs N` sets CoLA head epochs. The default is `1`. When you set `--cola-data`, the value must be a positive integer. Epoch count does not change the fixed byte suite.
 - `--split FRACTION` sets the contiguous CoLA train fraction. The default is `0.5`.
 - `--seed N` sets the checkpoint load and CoLA head seed. The default is `11`.
@@ -281,6 +281,8 @@ tmt benchmark runs/first/model.safetensors --cola-data data/cola.tsv --epochs 1 
 
 ### Behavior and files
 The fixed suite uses 393 input bytes in three documents and context windows of 1, 8, 32, and 128 bytes. It reports 390 full-history targets and 104 common targets. The common count uses the suffix shared by all windows. For CoLA, the loader reads the sentence from column four and the label from column two. It keeps the input row order. The fixed suite does not establish general model quality.
+
+The loader ignores blank lines and preserves sentence whitespace. TSV row numbers include blank lines.
 
 The split is contiguous. Values below 0 or above 1 are clipped to that range. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
 

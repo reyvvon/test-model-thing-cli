@@ -727,6 +727,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                                 for value, field in zip(states, fields)))
             result = run(str(checkpoint), 1, 0.5, str(data), model=model, seed=11)
             self.assertEqual(byte_only['byte_scores'], result['byte_scores'])
+            for partition in ('train', 'held'):
+                score = result['epochs'][0][partition]
+                self.assertEqual(sum(score[key] for key in ('tp', 'tn', 'fp', 'fn')), 2)
             with self.assertRaises(FileNotFoundError): run(str(checkpoint), data=str(root / 'missing.tsv'), model=model)
 
         scores = result['byte_scores']
