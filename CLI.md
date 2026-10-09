@@ -105,6 +105,7 @@ The default objective combines variance, latent-space prediction, next-byte cros
 Evaluation uses frozen weights, no samples, and the first byte as context. It restores internal state and RTU traces after success or failure.
 The default input budget is 8192 bytes across sorted files. Each context window counts input bytes before the target.
 
+Sweep requires a new or empty output folder. It rejects a nonempty folder without changes.
 Sweep appends one row per completed candidate to `results.jsonl`. It selects the lowest development BPB, with the first candidate as tie winner.
 Candidates use `run-NNNN/` folders with `model.safetensors`, `manifest/model.json`, and `manifest/run.json`.
 
@@ -121,3 +122,6 @@ Keep output paths apart from input paths. The CLI does not check collisions, tra
 Use positive update, byte, and window counts. Whole-file reads can require memory equal to the largest file.
 
 Keep objective loss, frozen BPB, and CoLA MCC separate. Tiny fixtures do not establish general model quality.
+
+File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
+An unmatched train glob fails before the CLI creates a named or timestamp run folder.

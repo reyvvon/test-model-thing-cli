@@ -103,6 +103,54 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertEqual(len((root / 'sample.bin').read_bytes()), 4)
             self.assertIn('390 targets', run('benchmark', str(checkpoint)))
 
+    def test_installed_failure_paths(self):
+        import os, sysconfig
+
+        env = dict(os.environ)
+        env.pop('PYTHONPATH', None)
+        command = str(Path(sysconfig.get_path('scripts')) / 'tmt')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def run(*args, success=False):
+                result = subprocess.run([command, *args], cwd=root, env=env,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0 if success else 1, result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                return result
+
+            # Missing data must fail before config loading or run-folder creation.
+            for extra in (['--run', 'absent'], []):
+                result = run('train', '--data', 'missing/*', *extra)
+                self.assertIn('no files matched', result.stderr)
+                self.assertEqual(list(root.iterdir()), [])
+
+            (root / 'model.json').write_text(json.dumps(self._tiny_settings()))
+            (root / 'grid.json').write_text('{"seed": [11, 22]}')
+            (root / 'train.bin').write_bytes(b'abc')
+            (root / 'dev.bin').write_bytes(b'xyz')
+            args = ['sweep', '--grid', 'grid.json', '--data', 'train.bin',
+                    '--development', 'dev.bin', '--output', 'sweep', '--updates', '2']
+            (root / 'sweep').mkdir()  # An existing empty folder is valid.
+            run(*args, success=True)
+            before = {p: p.read_bytes() for p in (root / 'sweep').rglob('*') if p.is_file()}
+            result = run(*args[:-1], '1')
+            self.assertIn('not empty', result.stderr)
+            self.assertEqual(before, {p: p.read_bytes() for p in (root / 'sweep').rglob('*') if p.is_file()})
+            checkpoint = root / 'sweep/run-0001/model.safetensors'
+            for contents in ('{', '[]', '{"unknown": 1}'):
+                (root / 'bad.json').write_text(contents)
+                run('train', '--data', 'train.bin', '--config', 'bad.json', '--run', 'bad')
+                self.assertFalse((root / 'runs/bad').exists())
+            run('generate', 'missing.safetensors', '--prompt', 'x', '--output', 'sample.bin')
+            (root / 'invalid.safetensors').write_bytes(b'invalid')
+            run('evaluate', 'invalid.safetensors', '--data', 'dev.bin')
+            (root / 'short.bin').write_bytes(b'x')
+            run('train', '--data', 'short.bin', '--run', 'no-targets', '--updates', '1')
+            record = json.loads((root / 'runs/no-targets/manifest/run.json').read_text())
+            self.assertEqual((record['status'], record['last_checkpoint']), ('failed', None))
+            result = run('evaluate', str(checkpoint), '--data', 'short.bin')
+            self.assertIn('at least one target', result.stderr)
+
     def test_init(self):
         from tmt.cli import load_config, main
         from tmt.main import Model
@@ -138,8 +186,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             main(['init'])
             Path('model.json').write_text('{"dim": 4}')
             before = {p: p.read_bytes() for p in Path('.').rglob('*') if p.is_file()}
-            with self.assertRaises(FileExistsError): main(['init'])
-            with self.assertRaises(FileExistsError): main(['init', '--output', 'model.json'])
+            for args in (['init'], ['init', '--output', 'model.json']):
+                with self.assertRaises(SystemExit) as exit: main(args)
+                self.assertEqual(exit.exception.code, 1)
             self.assertEqual(before, {p: p.read_bytes() for p in before})
 
     def test_config(self):
@@ -204,7 +253,8 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 self.assertEqual(command.call_args.args[:2], (self._tiny_settings(), Path('runs/named/model.safetensors')))
                 main(['train', '--data', str(data)])
                 self.assertEqual(command.call_args.args[1].parent.parent, Path('runs'))
-                with self.assertRaises(FileExistsError): main(['train', '--data', str(data), '--run', 'named'])
+                with self.assertRaises(SystemExit) as exit: main(['train', '--data', str(data), '--run', 'named'])
+                self.assertEqual(exit.exception.code, 1)
                 for args in (['--run', 'bad', 'model.safetensors'], ['--resume'], ['--resume', '--run', 'bad'],
                              ['model.safetensors', '--resume', '--config', 'model.json']):
                     with self.assertRaises(SystemExit) as exit: main(['train', '--data', str(data), *args])
@@ -262,6 +312,10 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
         mx.eval(*saved)
         def unchanged(): self.assertTrue(all(mx.array_equal(getattr(block, field), value).item() for field, value in zip(fields, saved)))
         uniform[0] = True
+        for documents in ([], [b''], [b'a', b'b']):
+            with self.assertRaisesRegex(ValueError, 'at least one target'):
+                evaluate(model, documents)
+            unchanged()
         uniform_score = evaluate(model, [b'aa'])
         self.assertAlmostEqual(uniform_score['bpb'], 8.0, delta=1e-6)
         self.assertIsNone(uniform_score['common_bpb'])

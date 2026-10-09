@@ -1,6 +1,8 @@
 # TMT command manual
 This manual describes the installed `tmt` command. Use Python 3.12 or 3.13 and install the package with pip. Commands that create a model or use a checkpoint need MLX. Manual requests need no MLX, model, config, data, or checkpoint. Use `-h` or `--help` for the command index or one topic. Use `--version` for package details.
 
+File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
+
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
 The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `dim`, `layers`, and `spread` are integer sizes. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss. The parser checks numeric syntax, not numeric ranges.
@@ -74,7 +76,7 @@ tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 
 ### Behavior and files
 The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets internal state and RTU traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
 
-A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder.
+A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder. An unmatched data glob fails before the CLI creates that folder.
 
 A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder. The five fields are `config` (model settings), `seed`, `started_at` (UTC time), `status`, and `last_checkpoint`. Status is `running`, `complete`, `interrupted`, or `failed`.
 
@@ -98,7 +100,7 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH
 - `--grid PATH` is required. The JSON object maps model fields or `seed` to arrays of values.
 - `--data GLOB` is required and selects raw-byte train files. Quote the glob.
 - `--development GLOB` is required and selects raw-byte score files. Quote the glob.
-- `--output DIR` is required. The command creates the folder when it does not exist.
+- `--output DIR` is required. The folder must be new or empty. The command rejects a nonempty folder without changes.
 - `--config PATH` selects the base model JSON. The default is `model.json` in the current folder.
 - `--updates N` sets target-byte updates per candidate. The default is `1000`.
 - `--seed N` sets the seed when the grid has no `seed` field. The default is `11`.
@@ -124,7 +126,7 @@ Each candidate config is `run-NNNN/manifest/model.json`. Its five-field run reco
 
 At the end, the command prints the row with the lowest development BPB. The first candidate wins a tie. The command does not write a separate best-model file.
 
-Use a new output folder for a new sweep. A repeated command reuses candidate folders and appends more rows to `results.jsonl`.
+Use a new or empty output folder for each sweep. The command rejects a nonempty folder to preserve checkpoints and result rows.
 
 ## evaluate
 

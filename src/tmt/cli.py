@@ -11,7 +11,12 @@ def load_config(path=None):
         with open(path) as file:
             overrides = json.load(file)
 
-    settings = inspect.signature(Model).bind(**overrides)
+    if not isinstance(overrides, dict):
+        raise ValueError('model config must be a JSON object')
+    try:
+        settings = inspect.signature(Model).bind(**overrides)
+    except TypeError as error:
+        raise ValueError(f'invalid model config: {error}') from error
     settings.apply_defaults()
     return {
         name: list(value) if isinstance(value, tuple) else value
@@ -240,9 +245,6 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
         'status': 'running',
         'last_checkpoint': str(checkpoint.resolve()) if resume else None,
     }
-    _write_manifest(manifest, record)
-    print(f'run folder: {checkpoint.parent}, seed: {seed}, config: {json.dumps(settings)}')
-
     def consume(byte):
         model.step(mx.array(byte), frozen=True)
         mx.eval(*[layer.states for layer in model.blocks])
@@ -256,6 +258,8 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
     last_loss = None
     status = 'failed'
     try:
+        _write_manifest(manifest, record)
+        print(f'run folder: {checkpoint.parent}, seed: {seed}, config: {json.dumps(settings)}')
         while completed < updates:
             before_pass = completed
             for filename in files:
@@ -352,6 +356,10 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
     keys = list(grid)
     development_data = list(documents(development, max_bytes))
     output = Path(output)
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError(
+            f'sweep output folder {output} is not empty; choose a new output folder'
+        )
     output.mkdir(parents=True, exist_ok=True)
     results_path = output / 'results.jsonl'
     rows = []
@@ -487,7 +495,7 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
+def _main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     parser = build_parser()
     help_flags = ('-h', '--help')
@@ -514,6 +522,8 @@ def main(argv=None):
             parser.error('checkpoint and --run cannot be used together')
         if args.resume and (args.checkpoint is None or args.run is not None):
             parser.error('--resume requires an explicit checkpoint and forbids --run')
+        if not glob.glob(args.data, recursive=True):
+            raise FileNotFoundError(f'no files matched {args.data!r}')
         settings = None if args.resume else load_config(args.config or 'model.json')
         if args.checkpoint is None:
             name = args.run or datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
@@ -532,6 +542,14 @@ def main(argv=None):
     elif args.command == 'sweep':
         sweep(args.grid, args.data, args.development, args.output, args.config,
               args.updates, args.seed, args.ce_only, args.max_bytes)
+
+
+def main(argv=None):
+    try:
+        return _main(argv)
+    except (OSError, ValueError) as error:
+        print(f'tmt: error: {error}', file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == '__main__':

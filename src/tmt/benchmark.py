@@ -71,6 +71,11 @@ def evaluate(model, documents, windows=()):
     documents, windows = tuple(documents), tuple(windows)
     input_bytes = sum(len(document) for document in documents)
     targets = sum(max(len(document) - 1, 0) for document in documents)
+    if targets == 0:
+        raise ValueError(
+            'evaluation requires at least one target byte pair '
+            '(a document with at least two bytes)'
+        )
     common_start = max(windows) if windows else None
     snapshot = [
         [mx.array(block.states), mx.array(block.decaytrace), mx.array(block.embedtrace)]
@@ -170,7 +175,9 @@ def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None,
 
     rows = cola(data)
     if rows == [] or len(rows) < 2:
-        raise FileNotFoundError('Invalid or missing CoLA dataset. Download it again from https://nyu-mll.github.io/CoLA/.')
+        raise FileNotFoundError(
+            f'CoLA TSV {data!r} must contain at least two valid four-column rows.'
+        )
 
     split = int(len(rows) * (min(max(split, 0.0), 1.0)))
     train, held = rows[:split], rows[split:]
