@@ -100,6 +100,14 @@ import tmt.main
         self.assertAlmostEqual(float(model.loss(mx.array(x), output, stop, 67, False, True).item()), cross_entropy, places=5)
         self.assertAlmostEqual(float(model.loss(mx.array(x), output, stop, None, False).item()), variance_term, places=5)
         self.assertEqual(float(model.loss(mx.array(x), output, stop, None, False, True)), 0.0)
+        components = {}
+        model.loss(mx.array(x), output, stop, 67, True, components=components)
+        for name, expected in (('variance', variance_term), ('latent_prediction', latent_term),
+                               ('cross_entropy', cross_entropy), ('stop', (stop_value - 1.0) ** 2)):
+            self.assertAlmostEqual(float(components[name].item()), expected, places=5)
+        model.loss(mx.array(x), output, stop, 67, False, True, components)
+        self.assertAlmostEqual(float(components['cross_entropy'].item()), cross_entropy, places=5)
+        self.assertTrue(all(float(components[name].item()) == 0.0 for name in ('variance', 'latent_prediction', 'stop')))
     def test_rtu_traces_and_manual_gradients(self):
         import mlx.core as mx
         from tmt.main import Model

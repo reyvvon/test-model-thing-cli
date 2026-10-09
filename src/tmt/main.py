@@ -62,12 +62,12 @@ class Model(nn.Module):
         self.optimizer = opt.AdamW(learning_rate = lrfn)
         self.compiled = None
 
-    def sample(self, output: mx.array):
+    def sample(self, output: mx.array, key: mx.array | None = None):
         probs = mx.softmax(output)
         entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(mx.array(256.0))
 
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
-        return mx.random.categorical(output / temp)
+        return mx.random.categorical(output / temp, key=key)
 
     def step(self, c: mx.array, dummies: mx.array | None = None, frozen: bool = False):
         if dummies is None: dummies = [mx.zeros((self.dim, )) for _ in range(self.layers)]
@@ -102,33 +102,45 @@ class Model(nn.Module):
             self.compiled(grads)
             mx.eval(self.parameters(), self.optimizer.state)
 
-    def loss(self, x: mx.array, output: mx.array, stop: mx.array, nextb: int | None, end: bool, ce_only: bool = False) -> mx.array:
+    def loss(self, x: mx.array, output: mx.array, stop: mx.array, nextb: int | None, end: bool, ce_only: bool = False,
+             components: dict | None = None) -> mx.array:
+        terms = {name: mx.array(0.0) for name in ('variance', 'latent_prediction', 'cross_entropy', 'stop')}
         if not ce_only:
             loss = mx.maximum(0.0, 1.0 - mx.sqrt(mx.var(x) + 1e-4))
+            terms['variance'] = loss
             if nextb is not None:
                 n = mx.array(nextb)
                 tgt = mx.stop_gradient(self.encoder(n))
 
-                loss = loss + mx.mean(mx.square(x - tgt))
+                terms['latent_prediction'] = mx.mean(mx.square(x - tgt))
+                terms['cross_entropy'] = -output[n] + mx.logsumexp(output)
+                terms['stop'] = mx.mean(mx.square(stop - mx.array([1.0 if end else 0.0])))
+                loss = loss + terms['latent_prediction']
                 loss = loss - output[n] + mx.logsumexp(output)
-                loss = loss + mx.mean(mx.square(stop - mx.array([1.0 if end else 0.0])))
+                loss = loss + terms['stop']
         else:
             if nextb is not None: loss = -output[mx.array(nextb)] + mx.logsumexp(output)
             else: loss = 0.0
+            terms['cross_entropy'] = mx.array(loss)
+
+        if components is not None:
+            components.update(terms)
 
         return loss
 
-    def train_step(self, currb: int, nextb: int | None, end: bool, ce_only: bool = False) -> tuple[mx.array, mx.array, mx.array]:
+    def train_step(self, currb: int, nextb: int | None, end: bool, ce_only: bool = False,
+                   metrics: dict | None = None) -> tuple[mx.array, mx.array, mx.array]:
         c = mx.array(currb)
         p = self.trainable_parameters()
 
         def fwd(params, dummies: list[mx.array]):
             self.update(params)
             (x, states, decays), (output, stop) = self.step(c, dummies)
-            loss = self.loss(x, output, stop, nextb, end, ce_only)
-            return loss, (states, decays, output, stop)
+            components = {}
+            loss = self.loss(x, output, stop, nextb, end, ce_only, components)
+            return loss, (states, decays, output, stop, components)
 
-        (loss, (states, decays, output, stop)), (grads, dlds_s) = mx.value_and_grad(
+        (loss, (states, decays, output, stop, components)), (grads, dlds_s) = mx.value_and_grad(
             fwd, argnums = (0, 1)
         )(p, [mx.zeros((self.dim, )) for _ in range(self.layers)])
 
@@ -155,6 +167,9 @@ class Model(nn.Module):
             for value in (layer.states, layer.decaytrace, layer.embedtrace)
         ])
 
+        if metrics is not None:
+            mx.eval(loss, *components.values())
+            metrics.update({name: float(value.item()) for name, value in components.items()})
         self.updategrads(grads)
         return output, stop, loss
 

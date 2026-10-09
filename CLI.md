@@ -88,14 +88,17 @@ It resets internal state and RTU traces at the first document. It does not resto
 
 The trainer writes `manifest/run.json` beside the checkpoint at start and exit.
 The record contains model `config`, invocation `seed`, UTC `started_at`, `status`, and `last_checkpoint`.
+It stores `null` in the sample and evaluation fields when those features are off.
 Status is `running`, `complete`, `failed`, or `interrupted`. A resume replaces the record for the invocation.
 
 The trainer writes one JSON object per line to `manifest/loss.jsonl`.
 Use `--log-every N` to set the update interval. Its default is `100` updates.
-Each row records `completed_updates`, `objective`, and the latest update's `loss`.
+Each row records `completed_updates`, `optimizer_step`, and `objective`.
+It also records the latest `loss`, interval `mean_loss`, and mean `mean_loss_components` for `cross_entropy`, `latent_prediction`, `variance`, and `stop`.
+The row includes `interval_updates`, `elapsed_seconds`, and `updates_per_second`.
 
-After at least one update, the trainer writes a final row at exit if the last update was outside the interval.
-The trainer does not duplicate an interval row when the run ends on that interval.
+After one or more updates, the trainer writes a final row if the last update was outside the interval.
+This rule also applies after a failure or interrupt. The trainer does not duplicate an interval row when the run ends on that interval.
 Each invocation replaces this file. This also applies to a resume.
 
 The record also contains `data_glob`, absolute `data_files` in shuffled pass order, requested `updates`, `log_every`, and `objective`.
@@ -110,7 +113,32 @@ Paths identify the file selection but do not prove that file contents stay the s
 This count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
 See the [manifest fields](src/tmt/commands.md#train) for details.
 
-The trainer prints completed updates, objective, and loss at each interval. It always prints the final loss.
+The trainer prints completed updates, total optimizer step, objective, mean loss, latest loss, and update speed at each interval.
+It always prints the final loss.
+`elapsed_seconds` is cumulative from the start of the train loop.
+`updates_per_second` uses time since the previous report, with time for reports, samples, and evaluation in that interval.
+
+Use `--sample-every N` to write a sample after each N completed updates.
+The command writes no samples by default.
+Set `--sample-prompt`, `--sample-seed`, and `--sample-bytes` to change the prompt, seed, and output length.
+The defaults are `The `, `11`, and `256` bytes. The byte count must be positive.
+
+The command prints an escaped preview and writes raw sample bytes under `samples/<UTC timestamp>/`.
+It records each sample in `manifest/samples.jsonl` with its update counts, prompt, seed, byte count, and path.
+Each invocation replaces the sample index.
+The command keeps old sample files.
+The command uses the same sample seed for each sample.
+The command clears the index at each invocation, even when sample output is off.
+
+Use `--eval-data GLOB` with `--eval-every N` to score held-out files while the trainer runs.
+You must set both options.
+The default evaluation byte budget is `8192` bytes. Set `--eval-max-bytes N` to change it.
+
+The command evaluates at each interval and after successful completion if the last update was outside the interval.
+It writes score rows to `manifest/evaluation.jsonl`. Each row includes `completed_updates`, `optimizer_step`, and the normal evaluation score fields.
+Evaluation uses frozen model weights and restores recurrent state and RTU traces.
+Each invocation replaces `evaluation.jsonl`.
+The command clears this file at each invocation, even when interval evaluation is off.
 
 It saves every 500 updates and at normal completion. It prints save feedback only after success.
 Ctrl-C does not save. Keep the last successful checkpoint. Direct writes can leave partial files after a process failure.
@@ -130,6 +158,9 @@ The default input budget is 8192 bytes across sorted files. Each context window 
 Sweep requires a new or empty output folder. It rejects a nonempty folder without changes.
 Sweep appends one row per completed candidate to `results.jsonl`. It selects the lowest development BPB, with the first candidate as tie winner.
 Candidates use `run-NNNN/` folders with `model.safetensors`, `manifest/model.json`, `manifest/run.json`, and `manifest/loss.jsonl`.
+Train sample and evaluation options apply to each candidate.
+
+The development score at the end of a sweep remains separate.
 
 The byte-only benchmark always uses 393 input bytes, 390 targets, and 104 common targets with windows 1, 8, 32, and 128.
 For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data cola.tsv --epochs 1 --split 0.5`.

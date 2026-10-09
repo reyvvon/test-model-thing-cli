@@ -34,7 +34,7 @@ tmt init --output configs/model.json
 ```
 
 ### Behavior and files
-Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults. Edit it before a real experiment.
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults. Edit it before a real experiment. The run template sets `sample` and `evaluation` to `null`.
 
 `grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, and `seed=[11,22]`. `run.example.json` shows the manifest fields with an empty file list and a null timestamp. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
 
@@ -46,7 +46,7 @@ Train a model on raw-byte documents and save a strict model and optimizer checkp
 
 ### Syntax
 ```text
-tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--updates N] [--log-every N] [--seed N] [--ce-only]
+tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--updates N] [--log-every N] [--seed N] [--ce-only] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
 ```
 
 ### Requirements and options
@@ -57,9 +57,16 @@ tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--up
 - `--resume` loads model and optimizer tensors from `CHECKPOINT`. It cannot be used with `--run` or `--config`.
 - `--run NAME` creates `runs/NAME/`. Do not combine it with `CHECKPOINT` or `--resume`.
 - `--updates N` sets target-byte optimizer updates. The default is `1000`. Use a positive value. On resume, this count is added to the saved optimizer step.
-- `--log-every N` sets the training progress interval in updates. The default is `100`. Use a positive value.
+- `--log-every N` sets the progress interval in updates during a train run. The default is `100`. Use a positive value.
 - `--seed N` sets the Python and MLX seeds. The default is `11`.
 - `--ce-only` uses next-byte cross entropy. Without it, the command uses the full TMT objective.
+- `--sample-every N` writes a sample after each N completed updates. The command writes no samples by default. Use a positive value.
+- `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
+- `--sample-seed N` sets the sample seed. The default is `11`.
+- `--sample-bytes N` sets the number of output bytes. The default is `256`. Use a positive value.
+- `--eval-data GLOB` selects held-out raw-byte files for interval evaluation. Quote the glob.
+- `--eval-every N` sets the evaluation interval in updates. Use a positive value. Set this option with `--eval-data`.
+- `--eval-max-bytes N` sets the global input-byte budget for each evaluation. The default is `8192` bytes. Use a positive value.
 - Get MLX, a valid model config, and at least one file that matches `GLOB` for a fresh run.
 
 ### Workflow
@@ -93,6 +100,8 @@ A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp ru
 | `completed_updates` | Zero at start. Completed updates in this invocation at exit, after success, failure, or interrupt. |
 | `resume` | `true` for resume, or `false` for a fresh run. |
 | `initial_optimizer_step` | The saved optimizer step at resume start, or zero for a fresh run. |
+| `sample` | Sample settings, or `null` when sampling is disabled. |
+| `evaluation` | Evaluation glob, selected files, interval, and byte budget, or `null` when interval evaluation is disabled. |
 | `started_at` | Invocation start time in UTC. |
 | `status` | `running`, `complete`, `interrupted`, or `failed`. |
 | `last_checkpoint` | Absolute path of the last successful checkpoint, or null before a fresh run saves. |
@@ -100,7 +109,13 @@ A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp ru
 The file list records selection and pass order. The update budget can stop a pass before the trainer reads every file. Paths do not prove that file contents stay the same. The completed update count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
 
 The command writes the manifest at start and exit. It writes progress loss rows to `manifest/loss.jsonl` beside the checkpoint.
-Each line is a JSON object with `completed_updates`, `objective`, and `loss`. The loss is the scalar from the latest update.
+Each line is a JSON object with `completed_updates`, `optimizer_step`, and `objective`.
+`loss` is the scalar from the latest update. `mean_loss` is the mean loss over the interval.
+
+`mean_loss_components` contains interval means for `cross_entropy`, `latent_prediction`, `variance`, and `stop`.
+The row also contains `interval_updates`, `elapsed_seconds`, and `updates_per_second`.
+`elapsed_seconds` counts time from the start of the train loop.
+`updates_per_second` uses time since the last report, with time for reports, samples, and evaluation from that interval.
 
 The command writes a row at each `--log-every` interval. After at least one update, it writes a final row at exit.
 It writes the row only if the last update was outside the interval.
@@ -113,8 +128,28 @@ The checkpoint contains model and optimizer tensors. The loader checks metadata,
 At fresh-run start, `last_checkpoint` is null. Resume starts with the input checkpoint path and replaces the invocation manifest. Each successful save sets `last_checkpoint` to the absolute path. Resume adds the requested optimizer updates and starts a new data pass. It does not restore a data cursor or random-number state.
 
 The command prints the run folder, seed, config, and successful checkpoint saves.
-At each progress interval, it prints completed updates, objective, and loss. It always prints the final loss.
+At each progress interval, it prints completed updates, total optimizer step, objective, mean loss, latest loss, and update speed.
+It always prints the final loss.
 It saves every 500 updates and at the end. It does not save on interrupt. The last successful checkpoint remains on disk.
+
+When `--sample-every` is set, the command samples from frozen weights at each interval.
+It preserves the model's recurrent state, RTU traces, and global random state for the train run.
+It uses `--sample-prompt`, `--sample-seed`, and `--sample-bytes` for each sample.
+The command prints an escaped preview and writes raw bytes to `samples/<UTC timestamp>/step-NNNNNNNNNNNN.bin`.
+The command uses the same sample seed for each sample.
+
+It writes one JSON object per sample to `manifest/samples.jsonl`.
+Each row has `completed_updates`, `optimizer_step`, `prompt`, `seed`, `bytes`, and `path`.
+Each invocation resets this index, even when sample output is off.
+The command keeps old sample files.
+
+When `--eval-data` and `--eval-every` are set, the command scores held-out files at each update interval.
+It also scores the model after a successful run if the final update is outside an interval.
+The scorer uses frozen weights and restores recurrent state and RTU traces.
+It writes one JSON object per score to `manifest/evaluation.jsonl`.
+Each row has `completed_updates`, `optimizer_step`, and the normal evaluation fields: `input_bytes`, `targets`, `bpb`, `common_targets`, `common_bpb`, and `windows`.
+
+Each invocation resets `evaluation.jsonl`, even when interval evaluation is off.
 
 ## sweep
 
@@ -122,7 +157,7 @@ Run each combination in a JSON grid in sequence, then score each trained model o
 
 ### Syntax
 ```text
-tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH] [--updates N] [--log-every N] [--seed N] [--ce-only] [--max-bytes N]
+tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH] [--updates N] [--log-every N] [--seed N] [--ce-only] [--max-bytes N] [--sample-every N] [--sample-prompt TEXT] [--sample-seed N] [--sample-bytes N] [--eval-data GLOB --eval-every N] [--eval-max-bytes N]
 ```
 
 ### Requirements and options
@@ -133,10 +168,17 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH
 - `--output DIR` is required. The folder must be new or empty. The command rejects a nonempty folder without changes.
 - `--config PATH` selects the base model JSON. The default is `model.json` in the current folder.
 - `--updates N` sets target-byte updates per candidate. The default is `1000`. Use a positive value.
-- `--log-every N` sets the training progress interval in updates for each candidate. The default is `100`. Use a positive value.
+- `--log-every N` sets the progress interval in updates for each candidate. The default is `100`. Use a positive value.
 - `--seed N` sets the seed when the grid has no `seed` field. The default is `11`.
 - `--ce-only` selects next-byte cross entropy. The default objective is full TMT.
 - `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes.
+- `--sample-every N` writes a sample after each N completed updates for each candidate. The command writes no samples by default. Use a positive value.
+- `--sample-prompt TEXT` sets the nonempty sample prompt. The default is `The `.
+- `--sample-seed N` sets the sample seed. The default is `11`.
+- `--sample-bytes N` sets the number of output bytes. The default is `256`. Use a positive value.
+- `--eval-data GLOB` selects held-out files for interval evaluation. Quote the glob.
+- `--eval-every N` sets the evaluation interval in updates. Use a positive value. Set this option with `--eval-data`.
+- `--eval-max-bytes N` sets the global input-byte budget for each evaluation. The default is `8192` bytes. Use a positive value.
 - A sweep needs MLX, the grid and data files, and the base config file.
 
 ### Workflow
@@ -153,7 +195,9 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 ### Behavior and files
 The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
 
-Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. Sample and interval-evaluation files also stay in each candidate folder. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+
+Interval evaluation uses `--eval-data` and `--eval-every`. It is separate from the development score at the end of each candidate. The development score still selects the best candidate.
 
 At the end, the command prints the row with the lowest development BPB. The first candidate wins a tie. The command does not write a separate best-model file.
 

@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 class CliTests(unittest.TestCase):
     manifest_fields = {'config', 'seed', 'data_glob', 'data_files', 'updates', 'log_every', 'objective',
                        'completed_updates', 'resume', 'initial_optimizer_step',
-                       'started_at', 'status', 'last_checkpoint'}
+                       'started_at', 'status', 'last_checkpoint', 'sample', 'evaluation'}
 
     def test_version(self):
         from io import StringIO
@@ -92,10 +92,20 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             run('init')
             (root / 'model.json').write_text('{"dim":4,"layers":1,"spread":4}')
             (root / 'data/train/tiny.bin').write_bytes(b'abcd')
-            progress = run('train', '--data', 'data/train/*', '--run', 'first', '--updates', '3', '--log-every', '2')
+            (root / 'data/dev/tiny.bin').write_bytes(b'wxyz')
+            progress = run('train', '--data', 'data/train/*', '--run', 'first', '--updates', '3', '--log-every', '2',
+                           '--sample-every', '2', '--sample-bytes', '4', '--sample-prompt', 'A', '--sample-seed', '7',
+                           '--eval-data', 'data/dev/*', '--eval-every', '2', '--eval-max-bytes', '3')
             self.assertIn('updates: 2, objective: tmt, loss:', progress)
             self.assertIn('updates: 3, objective: tmt, loss:', progress)
             checkpoint = root / 'runs/first/model.safetensors'
+            self.assertIn('sample at update 2, step 2:', progress)
+            self.assertIn('evaluation at update 3: BPB', progress)
+            samples = [json.loads(line) for line in (checkpoint.parent / 'manifest/samples.jsonl').read_text().splitlines()]
+            self.assertEqual([(row['completed_updates'], row['seed'], row['bytes'], row['prompt']) for row in samples], [(2, 7, 4, 'A')])
+            self.assertEqual(len(Path(samples[0]['path']).read_bytes()), 4)
+            evaluation = [json.loads(line) for line in (checkpoint.parent / 'manifest/evaluation.jsonl').read_text().splitlines()]
+            self.assertEqual([(row['completed_updates'], row['input_bytes'], row['targets']) for row in evaluation], [(2, 3, 2), (3, 3, 2)])
             model, settings = load_model(checkpoint)
             self.assertEqual((settings['dim'], settings['layers'], settings['spread'], model.optimizer.state['step'].item()), (4, 1, 4, 3))
             manifest = checkpoint.parent / 'manifest/run.json'
@@ -145,6 +155,18 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             (root / 'grid.json').write_text('{"seed": [11, 22]}')
             (root / 'train.bin').write_bytes(b'abc')
             (root / 'dev.bin').write_bytes(b'xyz')
+            for extra, message in (
+                (['--sample-every', '0'], 'sample-every must be positive'),
+                (['--sample-every', '1', '--sample-prompt', ''], 'sample-prompt must not be empty'),
+                (['--sample-every', '1', '--sample-bytes', '-1'], 'sample-bytes must be positive'),
+                (['--eval-data', 'dev.bin'], 'eval-data and eval-every must be used together'),
+                (['--eval-every', '1'], 'eval-data and eval-every must be used together'),
+                (['--eval-data', 'dev.bin', '--eval-every', '0'], 'eval-every must be positive'),
+                (['--eval-data', 'dev.bin', '--eval-every', '1', '--eval-max-bytes', '0'], 'eval-max-bytes must be positive'),
+            ):
+                result = run('train', '--data', 'train.bin', '--run', 'invalid', *extra)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((root / 'runs').exists())
             for count in ('0', '-1'):
                 result = run('train', '--data', 'train.bin', '--run', 'invalid', '--updates', count)
                 self.assertIn('updates must be positive', result.stderr)
@@ -269,9 +291,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             calls = []
             train_step, step = Model.train_step, Model.step
 
-            def record_train(model, current, target, end, ce_only=False):
+            def record_train(model, current, target, end, ce_only=False, **kwargs):
                 calls.append((current, target, end))
-                return train_step(model, current, target, end, ce_only)
+                return train_step(model, current, target, end, ce_only, **kwargs)
 
             from io import StringIO
             stdout = StringIO()
@@ -285,7 +307,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
 
             self.assertEqual(stdout.getvalue().count('run folder:'), 3)
             self.assertEqual(stdout.getvalue().count('saved checkpoint:'), 3)
-            self.assertEqual(stdout.getvalue().count('loss:'), 3)
+            self.assertEqual(stdout.getvalue().count('objective:'), 3)
             self.assertIn('seed: 11, config:', stdout.getvalue())
             self.assertNotIn('\r', stdout.getvalue())
 
@@ -330,9 +352,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                     data.write_bytes(content)
                     paths[content[0]] = str(data)
 
-                def record_train(model, current, target, end, objective=False):
+                def record_train(model, current, target, end, objective=False, **kwargs):
                     calls.append((paths[current], objective))
-                    return train_step(model, current, target, end, objective)
+                    return train_step(model, current, target, end, objective, **kwargs)
 
                 checkpoint = root / 'run' / 'model.safetensors'
                 records.clear()
@@ -373,11 +395,11 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                         original = checkpoint.read_bytes()
                     completed = 0
 
-                    def fail(model, current, target, end, ce_only=False):
+                    def fail(model, current, target, end, ce_only=False, **kwargs):
                         nonlocal completed
                         if completed == 1:
                             raise error_type('injected update failure')
-                        result = train_step(model, current, target, end, ce_only)
+                        result = train_step(model, current, target, end, ce_only, **kwargs)
                         completed += 1
                         return result
 
@@ -394,6 +416,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                     metrics = [json.loads(line) for line in (checkpoint.parent / 'manifest/loss.jsonl').read_text().splitlines()]
                     self.assertEqual([(row['completed_updates'], row['objective']) for row in metrics], [(1, 'ce_only')])
                     self.assertTrue(math.isfinite(metrics[0]['loss']))
+                    self.assertEqual(metrics[0]['interval_updates'], 1)
+                    self.assertEqual(metrics[0]['optimizer_step'], 3 if resume else 1)
+                    self.assertEqual(metrics[0]['loss'], metrics[0]['mean_loss'])
                     if resume:
                         self.assertEqual(checkpoint.read_bytes(), original)
                     else:
@@ -415,17 +440,30 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                     losses, stdout = [], StringIO()
                     original = Model.train_step
 
-                    def capture(model, *args):
-                        result = original(model, *args)
+                    def capture(model, *args, **kwargs):
+                        result = original(model, *args, **kwargs)
                         losses.append(float(result[2].item()))
                         return result
 
-                    with patch.object(Model, 'train_step', capture), contextlib.redirect_stdout(stdout):
+                    with (patch.object(Model, 'train_step', capture), contextlib.redirect_stdout(stdout),
+                          patch('tmt.cli.time.perf_counter', side_effect=[0, 2, 4, 6])):
                         model = train(self._tiny_settings(), checkpoint, str(data), updates,
                                       ce_only=True, log_every=interval)
                     metrics = [json.loads(line) for line in (root / 'manifest/loss.jsonl').read_text().splitlines()]
-                    self.assertEqual(metrics, [dict(completed_updates=index, objective='ce_only', loss=losses[index - 1]) for index in expected])
-                    self.assertEqual(stdout.getvalue().count('loss:'), len(expected))
+                    self.assertEqual([{name: row[name] for name in ('completed_updates', 'objective', 'loss')} for row in metrics],
+                                     [dict(completed_updates=index, objective='ce_only', loss=losses[index - 1]) for index in expected])
+                    previous = 0
+                    for number, row in enumerate(metrics, 1):
+                        count = row['completed_updates'] - previous
+                        mean = math.fsum(losses[previous:row['completed_updates']]) / count
+                        self.assertAlmostEqual(row['mean_loss'], mean)
+                        self.assertAlmostEqual(row['mean_loss_components']['cross_entropy'], mean)
+                        self.assertEqual({name: value for name, value in row['mean_loss_components'].items() if name != 'cross_entropy'},
+                                         dict(variance=0.0, latent_prediction=0.0, stop=0.0))
+                        self.assertEqual((row['interval_updates'], row['elapsed_seconds'], row['updates_per_second'], row['optimizer_step']),
+                                         (count, number * 2, count / 2, row['completed_updates']))
+                        previous = row['completed_updates']
+                    self.assertEqual(stdout.getvalue().count('objective:'), len(expected))
                     self.assertIn(f'updates: {updates}, objective: ce_only, loss: {losses[-1]:.6f}', stdout.getvalue())
                     self.assertEqual(json.loads((root / 'manifest/run.json').read_text())['log_every'], interval)
                     with contextlib.redirect_stdout(StringIO()):
@@ -621,6 +659,12 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertEqual(command.call_args.args[4], 'model.json')
             main([*args, '--config', 'custom.json'])
             self.assertEqual(command.call_args.args[4], 'custom.json')
+            main([*args, '--sample-every', '2', '--sample-bytes', '3',
+                  '--eval-data', 'held-out/*', '--eval-every', '5'])
+            self.assertEqual(command.call_args.kwargs['sample_every'], 2)
+            self.assertEqual(command.call_args.kwargs['sample_bytes'], 3)
+            self.assertEqual(command.call_args.kwargs['eval_data'], 'held-out/*')
+            self.assertEqual(command.call_args.kwargs['eval_every'], 5)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -634,7 +678,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 with self.subTest(ce_only=ce_only):
                     output, stdout = root / ('runs-ce' if ce_only else 'runs'), StringIO()
                     with contextlib.redirect_stdout(stdout):
-                        best = sweep(grid, str(train), str(development), output, config, 2, 11, ce_only, max_bytes=4, log_every=1)
+                        best = sweep(grid, str(train), str(development), output, config, 2, 11, ce_only,
+                                     max_bytes=4, log_every=1, sample_every=2, sample_bytes=3,
+                                     eval_data=str(development), eval_every=2, eval_max_bytes=3)
                     rows = [json.loads(line) for line in (output / 'results.jsonl').read_text().splitlines()]
                     self.assertEqual([(row['settings']['dim'], row['seed']) for row in rows], [(4, 11), (4, 22), (8, 11), (8, 22)])
                     self.assertEqual(best, min(rows, key=lambda row: row['development_bpb']))
@@ -650,6 +696,11 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                         self.assertEqual(manifest['log_every'], 1)
                         metrics = [json.loads(line) for line in (checkpoint.parent / 'manifest/loss.jsonl').read_text().splitlines()]
                         self.assertEqual([metric['completed_updates'] for metric in metrics], [1, 2])
+                        evaluation = json.loads((checkpoint.parent / 'manifest/evaluation.jsonl').read_text())
+                        self.assertEqual((evaluation['completed_updates'], evaluation['targets']), (2, 2))
+                        sample = json.loads((checkpoint.parent / 'manifest/samples.jsonl').read_text())
+                        self.assertEqual((sample['completed_updates'], sample['bytes']), (2, 3))
+                        self.assertEqual(len(Path(sample['path']).read_bytes()), 3)
                         for field in ('seed', 'updates', 'objective', 'data_glob'):
                             self.assertEqual(manifest[field], row[field])
                         self.assertEqual((manifest['data_files'], manifest['completed_updates'], manifest['resume'], manifest['initial_optimizer_step']),

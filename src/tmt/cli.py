@@ -1,4 +1,4 @@
-import argparse, glob, inspect, itertools, json, math, os, random, sys
+import argparse, glob, inspect, itertools, json, math, os, random, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -225,16 +225,66 @@ def _positive(value, name):
         raise ValueError(f'{name} must be positive')
 
 
+def _append_jsonl(path, row):
+    with open(path, 'a') as file:
+        file.write(json.dumps(row) + '\n')
+
+
+def _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
+                         eval_every, eval_max_bytes):
+    if sample_every is not None:
+        _positive(sample_every, 'sample-every')
+        _positive(sample_bytes, 'sample-bytes')
+        if not sample_prompt:
+            raise ValueError('sample-prompt must not be empty')
+    if (eval_data is None) != (eval_every is None):
+        raise ValueError('eval-data and eval-every must be used together')
+    if eval_every is not None:
+        _positive(eval_every, 'eval-every')
+        _positive(eval_max_bytes, 'eval-max-bytes')
+
+
+def _training_sample(model, prompt, count, seed):
+    """Sample with a local RNG key and restore recurrent state after any exit."""
+    import mlx.core as mx
+
+    fields = ('states', 'decaytrace', 'embedtrace')
+    snapshot = [[mx.array(getattr(block, field)) for field in fields] for block in model.blocks]
+    mx.eval(*(value for saved in snapshot for value in saved))
+    try:
+        model.reset()
+        for byte in prompt.encode('utf-8'):
+            _, (logits, _) = model.step(mx.array(byte), frozen=True)
+        key = mx.random.key(seed)
+        generated = bytearray()
+        for _ in range(count):
+            key, sample_key = mx.random.split(key)
+            byte = int(model.sample(logits, key=sample_key).item())
+            generated.append(byte)
+            _, (logits, _) = model.step(mx.array(byte), frozen=True)
+        mx.eval(*(block.states for block in model.blocks))
+        return bytes(generated)
+    finally:
+        for block, saved in zip(model.blocks, snapshot):
+            for field, value in zip(fields, saved):
+                setattr(block, field, value)
+        mx.eval(*(value for saved in snapshot for value in saved))
+
+
 def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=False,
-          log_every=100):
+          log_every=100, sample_every=None, sample_prompt='The ', sample_seed=11,
+          sample_bytes=256, eval_data=None, eval_every=None, eval_max_bytes=8192):
     """Train on adjacent raw-byte pairs and record the run manifest."""
     _positive(updates, 'updates')
     _positive(log_every, 'log-every')
+    _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
+                         eval_every, eval_max_bytes)
     import mlx.core as mx
 
     files = sorted(glob.glob(pattern, recursive=True))
     if not files:
         raise FileNotFoundError(f'no files matched {pattern!r}')
+    evaluation_data = None if eval_data is None else list(documents(eval_data, eval_max_bytes))
     if resume:
         model, settings = load_model(path, seed)
     else:
@@ -258,6 +308,13 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
         'completed_updates': 0,
         'resume': resume,
         'initial_optimizer_step': int(model.optimizer.state['step'].item()) if resume else 0,
+        'sample': None if sample_every is None else {
+            'every': sample_every, 'prompt': sample_prompt, 'seed': sample_seed, 'bytes': sample_bytes,
+        },
+        'evaluation': None if eval_every is None else {
+            'every': eval_every, 'data_glob': eval_data, 'max_bytes': eval_max_bytes,
+            'data_files': [str(Path(name).resolve()) for name in sorted(glob.glob(eval_data, recursive=True))],
+        },
         'started_at': datetime.now(timezone.utc).isoformat(),
         'status': 'running',
         'last_checkpoint': str(checkpoint.resolve()) if resume else None,
@@ -274,19 +331,64 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
     completed = 0
     last_loss = None
     logged = 0
+    evaluated = 0
+    loss_sum = 0.0
+    component_sums = {}
+    started = last_report = time.perf_counter()
+    sample_dir = checkpoint.parent / 'samples' / datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
 
     def report_loss():
-        nonlocal logged
+        nonlocal logged, last_report, loss_sum
+        now = time.perf_counter()
+        interval_updates = completed - logged
         loss = float(last_loss.item())
-        row = {'completed_updates': completed, 'objective': record['objective'], 'loss': loss}
-        with open(metrics, 'a') as file:
-            file.write(json.dumps(row) + '\n')
-        print(f"updates: {completed}, objective: {record['objective']}, loss: {loss:.6f}", flush=True)
+        row = {
+            'completed_updates': completed,
+            'optimizer_step': int(model.optimizer.state['step'].item()),
+            'objective': record['objective'], 'loss': loss,
+            'mean_loss': loss_sum / interval_updates,
+            'mean_loss_components': {name: value / interval_updates for name, value in component_sums.items()},
+            'interval_updates': interval_updates, 'elapsed_seconds': now - started,
+            'updates_per_second': interval_updates / max(now - last_report, 1e-9),
+        }
+        _append_jsonl(metrics, row)
+        print(f"updates: {completed}, objective: {record['objective']}, loss: {loss:.6f}, "
+              f"mean loss: {row['mean_loss']:.6f}, step: {row['optimizer_step']}, "
+              f"updates/s: {row['updates_per_second']:.2f}", flush=True)
         logged = completed
+        last_report = now
+        loss_sum = 0.0
+        component_sums.clear()
+
+    def report_sample():
+        sample = _training_sample(model, sample_prompt, sample_bytes, sample_seed)
+        step = int(model.optimizer.state['step'].item())
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        destination = sample_dir / f'step-{step:012d}.bin'
+        destination.write_bytes(sample)
+        _append_jsonl(manifest_dir / 'samples.jsonl', {
+            'completed_updates': completed, 'optimizer_step': step, 'prompt': sample_prompt,
+            'seed': sample_seed, 'bytes': len(sample), 'path': str(destination.resolve()),
+        })
+        print(f'sample at update {completed}, step {step}: {sample!r}', flush=True)
+
+    def report_evaluation():
+        nonlocal evaluated
+        from tmt.benchmark import evaluate
+
+        result = evaluate(model, evaluation_data)
+        _append_jsonl(manifest_dir / 'evaluation.jsonl', {
+            'completed_updates': completed,
+            'optimizer_step': int(model.optimizer.state['step'].item()), **result,
+        })
+        print(f"evaluation at update {completed}: BPB {result['bpb']:.6f}, targets: {result['targets']}", flush=True)
+        evaluated = completed
 
     status = 'failed'
     try:
         metrics.write_text('')
+        (manifest_dir / 'samples.jsonl').write_text('')
+        (manifest_dir / 'evaluation.jsonl').write_text('')
         _write_manifest(manifest, record)
         print(f'run folder: {checkpoint.parent}, seed: {seed}, config: {json.dumps(settings)}')
         while completed < updates:
@@ -301,14 +403,22 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
                     continue
                 for index in range(len(data) - 1):
                     end = index == len(data) - 2
+                    components = {}
                     _, _, last_loss = model.train_step(
-                        data[index], data[index + 1], end, ce_only
+                        data[index], data[index + 1], end, ce_only, metrics=components
                     )
                     completed += 1
+                    loss_sum += float(last_loss.item())
+                    for name, value in components.items():
+                        component_sums[name] = component_sums.get(name, 0.0) + value
                     if completed % log_every == 0:
                         report_loss()
                     if end:
                         consume(data[-1])
+                    if sample_every is not None and completed % sample_every == 0:
+                        report_sample()
+                    if eval_every is not None and completed % eval_every == 0:
+                        report_evaluation()
                     if completed % 500 == 0:
                         save()
                     if completed >= updates:
@@ -317,6 +427,8 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
                     break
             if completed == before_pass:
                 raise ValueError('no training targets found in data pass')
+        if eval_every is not None and completed != evaluated:
+            report_evaluation()
         save()
         status = 'complete'
     except KeyboardInterrupt:
@@ -387,10 +499,14 @@ def generate(checkpoint, prompt, output, seed=11, count=512, temperature=None,
 
 
 def sweep(grid_path, pattern, development, output, config='model.json', updates=1000,
-          seed=11, ce_only=False, max_bytes=8192, log_every=100):
+          seed=11, ce_only=False, max_bytes=8192, log_every=100,
+          sample_every=None, sample_prompt='The ', sample_seed=11, sample_bytes=256,
+          eval_data=None, eval_every=None, eval_max_bytes=8192):
     """Run each model and seed pair in JSON product order."""
     _positive(updates, 'updates')
     _positive(log_every, 'log-every')
+    _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
+                         eval_every, eval_max_bytes)
     from tmt.benchmark import evaluate
 
     settings = load_config(config)
@@ -421,7 +537,10 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
             file.write('\n')
         checkpoint = run_path / 'model.safetensors'
         model = train(run_settings, checkpoint, pattern, updates, run_seed,
-                      ce_only, resume=False, log_every=log_every)
+                      ce_only, resume=False, log_every=log_every,
+                      sample_every=sample_every, sample_prompt=sample_prompt,
+                      sample_seed=sample_seed, sample_bytes=sample_bytes,
+                      eval_data=eval_data, eval_every=eval_every, eval_max_bytes=eval_max_bytes)
         score = evaluate(model, development_data)
         row = {
             'run': index,
@@ -454,6 +573,7 @@ def init_config(path=None):
                              'data_glob': 'data/train/*', 'data_files': [],
                              'updates': 1000, 'log_every': 100, 'objective': 'tmt', 'completed_updates': 0,
                              'resume': False, 'initial_optimizer_step': 0, 'started_at': None,
+                             'sample': None, 'evaluation': None,
                              'status': 'running', 'last_checkpoint': None},
     }
     for destination, value in templates.items():
@@ -493,6 +613,15 @@ def command_manual(topic=None):
 
 
 def build_parser():
+    def monitoring_options(command):
+        command.add_argument('--sample-every', type=int, help='positive sample interval in updates; default: disabled')
+        command.add_argument('--sample-prompt', default='The ', help='fixed nonempty sample prompt, default: "The "')
+        command.add_argument('--sample-seed', type=int, default=11, help='fixed sample seed, default: 11')
+        command.add_argument('--sample-bytes', type=int, default=256, help='positive sample byte count, default: 256')
+        command.add_argument('--eval-data', help='quoted held-out byte glob; requires --eval-every')
+        command.add_argument('--eval-every', type=int, help='positive held-out BPB interval in updates; requires --eval-data')
+        command.add_argument('--eval-max-bytes', type=int, default=8192, help='positive held-out input byte budget, default: 8192')
+
     parser = argparse.ArgumentParser(prog='tmt', description='TMT experiment commands', epilog='Use tmt help for the complete command manual.')
     parser.add_argument('--version', action='version', version=version_text())
     commands = parser.add_subparsers(dest='command', required=True)
@@ -509,6 +638,7 @@ def build_parser():
     training.add_argument('--log-every', type=int, default=100, help='positive loss report interval in updates, default: 100')
     training.add_argument('--seed', type=int, default=11, help='Python and MLX seed, default: 11')
     training.add_argument('--ce-only', action='store_true', help='next-byte cross entropy only; default: full TMT objective')
+    monitoring_options(training)
     evaluation = commands.add_parser('evaluate', help='score next-byte predictions')
     evaluation.add_argument('checkpoint', help='strict model and optimizer checkpoint')
     evaluation.add_argument('--data', required=True, help='quoted raw-file glob, one document per file')
@@ -540,6 +670,7 @@ def build_parser():
     sweeping.add_argument('--seed', type=int, default=11, help='seed when absent from grid, default: 11')
     sweeping.add_argument('--ce-only', action='store_true', help='next-byte cross entropy only; default: full TMT objective')
     sweeping.add_argument('--max-bytes', type=int, default=8192, help='global development input-byte prefix, default: 8192')
+    monitoring_options(sweeping)
     commands.add_parser('help', help='read the bundled command manual or one topic')
     return parser
 
@@ -566,6 +697,12 @@ def _main(argv=None):
     args = parser.parse_args(argv)
     if args.command in ('train', 'sweep'):
         _positive(args.updates, 'updates')
+        monitoring = {name: getattr(args, name) for name in (
+            'sample_every', 'sample_prompt', 'sample_seed', 'sample_bytes',
+            'eval_data', 'eval_every', 'eval_max_bytes',
+        )}
+        _validate_monitoring(args.sample_every, args.sample_prompt, args.sample_bytes,
+                             args.eval_data, args.eval_every, args.eval_max_bytes)
     if args.command in ('train', 'sweep', 'generate'):
         _positive(args.log_every, 'log-every')
     if args.command == 'init':
@@ -584,7 +721,7 @@ def _main(argv=None):
             folder.mkdir(parents=True, exist_ok=False)
             args.checkpoint = folder / 'model.safetensors'
         train(settings, args.checkpoint, args.data, args.updates, args.seed, args.ce_only, args.resume,
-              args.log_every)
+              args.log_every, **monitoring)
     elif args.command == 'evaluate':
         evaluate_command(args)
     elif args.command == 'benchmark':
@@ -596,7 +733,7 @@ def _main(argv=None):
                  args.log_every)
     elif args.command == 'sweep':
         sweep(args.grid, args.data, args.development, args.output, args.config,
-              args.updates, args.seed, args.ce_only, args.max_bytes, args.log_every)
+              args.updates, args.seed, args.ce_only, args.max_bytes, args.log_every, **monitoring)
 
 
 def main(argv=None):
