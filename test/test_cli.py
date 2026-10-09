@@ -156,6 +156,11 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             (root / 'train.bin').write_bytes(b'abc')
             (root / 'dev.bin').write_bytes(b'xyz')
             for extra, message in (
+                (['--sample-prompt', ''], 'sample-prompt must not be empty'),
+                (['--sample-bytes', '0'], 'sample-bytes must be positive'),
+                (['--sample-bytes', '-1'], 'sample-bytes must be positive'),
+                (['--eval-max-bytes', '0'], 'eval-max-bytes must be positive'),
+                (['--eval-max-bytes', '-1'], 'eval-max-bytes must be positive'),
                 (['--sample-every', '0'], 'sample-every must be positive'),
                 (['--sample-every', '1', '--sample-prompt', ''], 'sample-prompt must not be empty'),
                 (['--sample-every', '1', '--sample-bytes', '-1'], 'sample-bytes must be positive'),
@@ -167,6 +172,17 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 result = run('train', '--data', 'train.bin', '--run', 'invalid', *extra)
                 self.assertIn(message, result.stderr)
                 self.assertFalse((root / 'runs').exists())
+                result = run('sweep', '--grid', 'grid.json', '--data', 'train.bin',
+                             '--development', 'dev.bin', '--output', 'invalid', *extra)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((root / 'invalid').exists())
+            for name in ('', '.', '..', '../escaped-name', str(root / 'absolute-name'),
+                         'nested/name', 'trailing/', 'nested\\name'):
+                with self.subTest(name=name):
+                    result = run('train', '--data', 'train.bin', '--run', name)
+                    self.assertIn('run must be one relative folder name', result.stderr)
+                    self.assertFalse((root / 'runs').exists())
+                    self.assertFalse((root / 'absolute-name').exists())
             for count in ('0', '-1'):
                 result = run('train', '--data', 'train.bin', '--run', 'invalid', '--updates', count)
                 self.assertIn('updates must be positive', result.stderr)
@@ -208,7 +224,8 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 self.assertIn('epochs must be positive with cola-data', result.stderr)
                 self.assertNotIn('Traceback', result.stderr)
             for grid in ([4], None, {'dim': 4}, {'dim': []}, {'dim': [4], 'seed': []},
-                         {'dim': [4, 0]}, {'unknown': [1]}, {'seed': [11, '22']}):
+                         {'dim': [4, 0]}, {'unknown': [1]}, {'seed': [11, '22']},
+                         {'seed': [11, -1]}, {'seed': [11, 2**64]}):
                 with self.subTest(grid=grid):
                     (root / 'bad-grid.json').write_text(json.dumps(grid))
                     result = run('sweep', '--grid', 'bad-grid.json', '--data', 'train.bin',
@@ -246,6 +263,72 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertEqual((record['updates'], record['completed_updates'], record['initial_optimizer_step']), (1, 0, 0))
             result = run('evaluate', str(checkpoint), '--data', 'short.bin')
             self.assertIn('at least one target', result.stderr)
+
+    def test_cli_rejects_seeds_before_work(self):
+        script = """
+import builtins, runpy
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == 'tmt.main' or name == 'tmt.benchmark' or name == 'mlx' or name.startswith('mlx.'):
+        raise ImportError('model import forbidden before seed validation')
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+runpy.run_module('tmt', run_name='__main__', alter_sys=True)
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / 'protected.bin'
+            output.write_bytes(b'keep')
+            commands = (
+                ['train', '--data', 'missing/*', '--run', 'invalid'],
+                ['train', 'missing.safetensors', '--data', 'missing/*', '--resume'],
+                ['generate', 'missing.safetensors', '--prompt', 'X', '--output', str(output)],
+                ['benchmark', 'missing.safetensors'],
+                ['sweep', '--grid', 'missing.json', '--data', 'missing/*',
+                 '--development', 'missing/*', '--output', 'invalid'],
+            )
+            for seed in (-1, 2**64):
+                for args in commands:
+                    options = ('--seed', '--sample-seed') if args[0] in ('train', 'sweep') else ('--seed',)
+                    for option in options:
+                        with self.subTest(command=args[0], option=option, seed=seed):
+                            result = subprocess.run([sys.executable, '-c', script, *args, option, str(seed)],
+                                                    cwd=root, capture_output=True, text=True, timeout=10)
+                            self.assertEqual(result.returncode, 1, result.stderr)
+                            self.assertIn(f'{option[2:]} must be between 0 and {2**64 - 1}', result.stderr)
+                            self.assertNotIn('Traceback', result.stderr)
+                result = subprocess.run([sys.executable, '-m', 'tmt.benchmark', 'missing.safetensors',
+                                         '--seed', str(seed)], cwd=root, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('seed must be between', result.stderr)
+                self.assertNotIn('Traceback', result.stderr)
+                self.assertEqual(output.read_bytes(), b'keep')
+                self.assertEqual(list(root.iterdir()), [output])
+
+    def test_seed_validation_before_direct_model_work(self):
+        from tmt.cli import generate, load_model, new_model, sweep, train
+        from tmt.benchmark import run
+
+        with patch('tmt.cli.load_config') as config, patch('tmt.cli._validate_model_settings') as settings:
+            for seed in (-1, 2**64, True, 1.5):
+                calls = (
+                    lambda: new_model({}, seed),
+                    lambda: load_model('missing.safetensors', seed),
+                    lambda: generate('missing.safetensors', 'X', 'unused.bin', seed),
+                    lambda: train({}, 'unused/model.safetensors', 'missing/*', seed=seed),
+                    lambda: train({}, 'unused/model.safetensors', 'missing/*', sample_seed=seed),
+                    lambda: sweep('missing.json', 'missing/*', 'missing/*', 'unused', seed=seed),
+                    lambda: sweep('missing.json', 'missing/*', 'missing/*', 'unused', sample_seed=seed),
+                )
+                for call in calls:
+                    with self.subTest(seed=seed, call=call), self.assertRaisesRegex(ValueError, 'seed must be'):
+                        call()
+                model = Mock()
+                with self.assertRaisesRegex(ValueError, 'seed must be'):
+                    run('missing.safetensors', model=model, seed=seed)
+                model.freeze.assert_not_called()
+            config.assert_not_called()
+            settings.assert_not_called()
 
     def test_init(self):
         from tmt.cli import load_config, main
@@ -730,6 +813,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self.assertEqual(first_path.read_bytes(), first)
             self.assertEqual(second_path.read_bytes(), second)
             self.assertEqual(path.read_bytes(), original)
+            for seed in (0, 2**64 - 1):
+                with self.subTest(seed=seed):
+                    self.assertEqual(len(generate(path, 'X', first_path, seed, 1)), 1)
             self.assertEqual(generate(path, 'The ', first_path, count=0), b'')
             self.assertEqual(first_path.read_bytes(), b'')
             with self.assertRaisesRegex(ValueError, 'bytes must be nonnegative'):
@@ -781,7 +867,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                      for axis in (4, None, '4', {}, [], True))
         cases.extend((({'dim': [4], 'seed': []}, "sweep grid field 'seed' must be a nonempty array"),
                       ({'dim': [4, 0]}, 'model config.dim must be a positive integer'),
-                      ({'seed': [11, True]}, 'sweep grid seed must be an integer')))
+                      ({'seed': [11, True]}, 'sweep grid seed must be an integer'),
+                      ({'seed': [11, -1]}, 'sweep grid seed must be between'),
+                      ({'seed': [11, 2**64]}, 'sweep grid seed must be between')))
         with tempfile.TemporaryDirectory() as directory, patch('tmt.cli.train') as train:
             root = Path(directory)
             config, grid_path, output = root / 'model.json', root / 'grid.json', root / 'sweep'

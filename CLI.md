@@ -78,10 +78,12 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 
 Train and sweep default to `model.json`. An explicit `--config PATH` overrides it for a fresh run.
 The CLI checks config types and limits before model creation. The [command manual](src/tmt/commands.md) lists these limits.
+All CLI seeds and sweep grid seeds must be integers from `0` to `18446744073709551615`, inclusive.
 Evaluation and sweep require a positive `--max-bytes` value. Zero and negative values cause an input error.
 
 Evaluation also needs at least one document with two bytes in the selected input prefix. Empty and one-byte documents provide no targets.
 `--run NAME` creates `runs/NAME/model.safetensors` in a new folder.
+Use one relative folder name without path separators. Empty names, `.` and `..` are invalid.
 With neither a name nor a checkpoint, train uses a UTC timestamp with microseconds as the run folder name.
 
 For an explicit path, use `tmt train other/model.safetensors --data 'data/train/*' --updates 3`.
@@ -126,6 +128,7 @@ Use `--sample-every N` to write a sample after each N completed updates.
 The command writes no samples by default.
 Set `--sample-prompt`, `--sample-seed`, and `--sample-bytes` to change the prompt, seed, and output length.
 The defaults are `The `, `11`, and `256` bytes. The byte count must be positive.
+Sample prompts must be nonempty. The CLI checks sample values and evaluation byte budgets even when samples or interval evaluation are off.
 
 The command prints an escaped preview and writes raw sample bytes under `samples/<UTC timestamp>/`.
 It records each sample in `manifest/samples.jsonl` with its update counts, prompt, seed, byte count, and path.

@@ -26,6 +26,7 @@ def load_config(path=None):
 
 
 def new_model(settings, seed):
+    _validate_seed(seed)
     _validate_model_settings(settings, 'model config')
     import random
     import mlx.core as mx
@@ -178,6 +179,7 @@ def save_checkpoint(path, model, settings):
 
 
 def load_model(path, seed=11):
+    _validate_seed(seed)
     import mlx.core as mx
     import mlx.utils as util
 
@@ -229,6 +231,18 @@ def _positive(value, name):
         raise ValueError(f'{name} must be positive')
 
 
+def _validate_seed(value, name='seed'):
+    if type(value) is not int:
+        raise ValueError(f'{name} must be an integer')
+    if not 0 <= value < 2**64:
+        raise ValueError(f'{name} must be between 0 and {2**64 - 1}')
+
+
+def _validate_run_name(name):
+    if not name or name in ('.', '..') or any(char in name for char in ('/', '\\', '\0')):
+        raise ValueError('run must be one relative folder name')
+
+
 def _append_jsonl(path, row):
     with open(path, 'a') as file:
         file.write(json.dumps(row) + '\n')
@@ -236,20 +250,21 @@ def _append_jsonl(path, row):
 
 def _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
                          eval_every, eval_max_bytes):
+    _positive(sample_bytes, 'sample-bytes')
+    if not sample_prompt:
+        raise ValueError('sample-prompt must not be empty')
+    _positive(eval_max_bytes, 'eval-max-bytes')
     if sample_every is not None:
         _positive(sample_every, 'sample-every')
-        _positive(sample_bytes, 'sample-bytes')
-        if not sample_prompt:
-            raise ValueError('sample-prompt must not be empty')
     if (eval_data is None) != (eval_every is None):
         raise ValueError('eval-data and eval-every must be used together')
     if eval_every is not None:
         _positive(eval_every, 'eval-every')
-        _positive(eval_max_bytes, 'eval-max-bytes')
 
 
 def _training_sample(model, prompt, count, seed):
     """Sample with a local RNG key and restore recurrent state after any exit."""
+    _validate_seed(seed, 'sample-seed')
     import mlx.core as mx
 
     fields = ('states', 'decaytrace', 'embedtrace')
@@ -279,6 +294,8 @@ def train(settings, path, pattern, updates=1000, seed=11, ce_only=False, resume=
           log_every=100, sample_every=None, sample_prompt='The ', sample_seed=11,
           sample_bytes=256, eval_data=None, eval_every=None, eval_max_bytes=8192):
     """Train on adjacent raw-byte pairs and record the run manifest."""
+    _validate_seed(seed)
+    _validate_seed(sample_seed, 'sample-seed')
     _positive(updates, 'updates')
     _positive(log_every, 'log-every')
     _validate_monitoring(sample_every, sample_prompt, sample_bytes, eval_data,
@@ -471,6 +488,7 @@ def evaluate_command(args):
 def generate(checkpoint, prompt, output, seed=11, count=512, temperature=None,
              log_every=1000):
     """Replay a UTF-8 prompt and write a fixed count of sampled bytes."""
+    _validate_seed(seed)
     if not prompt:
         raise ValueError('generation needs a nonempty prompt')
     if count < 0:
@@ -510,6 +528,8 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
           sample_every=None, sample_prompt='The ', sample_seed=11, sample_bytes=256,
           eval_data=None, eval_every=None, eval_max_bytes=8192):
     """Run each model and seed pair in JSON product order."""
+    _validate_seed(seed)
+    _validate_seed(sample_seed, 'sample-seed')
     _positive(updates, 'updates')
     _positive(log_every, 'log-every')
     _positive(max_bytes, 'max-bytes')
@@ -527,8 +547,7 @@ def sweep(grid_path, pattern, development, output, config='model.json', updates=
             raise ValueError(f'sweep grid field {key!r} must be a nonempty array')
         for value in axis:
             if key == 'seed':
-                if type(value) is not int:
-                    raise ValueError('sweep grid seed must be an integer')
+                _validate_seed(value, 'sweep grid seed')
             else:
                 candidate = dict(settings)
                 candidate[key] = value
@@ -651,7 +670,7 @@ def build_parser():
     init.add_argument('--output', help='write only model JSON to PATH; default: initialize current folder')
     training = commands.add_parser('train', help='train a model on byte files')
     training.add_argument('checkpoint', nargs='?', help='explicit checkpoint path; required with --resume')
-    training.add_argument('--run', help='new runs/NAME folder; default: UTC timestamp with microseconds; excludes checkpoint and --resume')
+    training.add_argument('--run', help='one relative folder name under runs/; default: UTC timestamp with microseconds; excludes checkpoint and --resume')
     training.add_argument('--data', required=True, help='quoted raw-file glob, one document per file')
     settings = training.add_mutually_exclusive_group()
     settings.add_argument('--config', help='fresh model JSON, default: model.json in current folder; excludes --resume')
@@ -717,7 +736,10 @@ def _main(argv=None):
             parser.error(str(error))
         return
     args = parser.parse_args(argv)
+    if hasattr(args, 'seed'):
+        _validate_seed(args.seed)
     if args.command in ('train', 'sweep'):
+        _validate_seed(args.sample_seed, 'sample-seed')
         _positive(args.updates, 'updates')
         monitoring = {name: getattr(args, name) for name in (
             'sample_every', 'sample_prompt', 'sample_seed', 'sample_bytes',
@@ -734,6 +756,8 @@ def _main(argv=None):
             parser.error('checkpoint and --run cannot be used together')
         if args.resume and (args.checkpoint is None or args.run is not None):
             parser.error('--resume requires an explicit checkpoint and forbids --run')
+        if args.run is not None:
+            _validate_run_name(args.run)
         if not glob.glob(args.data, recursive=True):
             raise FileNotFoundError(f'no files matched {args.data!r}')
         settings = None if args.resume else load_config(args.config or 'model.json')

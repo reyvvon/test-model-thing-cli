@@ -162,6 +162,8 @@ def benchmark(model: Model, data: list, train: bool, head: Classification, optim
     return {'tp': tp, 'tn': tn, 'fp': fp, 'fn': fn, 'mcc': mcc(tp, tn, fp, fn)}
 
 def run(path: str, epochs: int = 1, split: float = 0.5, data: str | None = None, *, model=None, seed=11):
+    from tmt.cli import _validate_seed
+    _validate_seed(seed)
     if data is not None and epochs < 1:
         raise ValueError('epochs must be positive with cola-data')
     if model is None:

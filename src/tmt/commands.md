@@ -3,6 +3,10 @@ This manual describes the installed `tmt` command. Use Python 3.12 or 3.13 and i
 
 File errors and invalid values print a short error to stderr and exit with code `1`. Argument errors exit with code `2`.
 
+All `--seed`, `--sample-seed`, and sweep grid seed values must be integers from `0` to `18446744073709551615`, inclusive. Boolean grid values are invalid. The CLI checks these limits before model work or run folder creation, even when a seed has no effect.
+
+Sample prompts must be nonempty. Sample byte counts and evaluation byte budgets must be positive. These requirements also apply when samples or interval evaluation are off.
+
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
 The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss.
@@ -57,7 +61,7 @@ tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--up
 - `--data GLOB` is required. Quote the glob so the CLI, not the shell, expands it.
 - `--config PATH` supplies model JSON values for a fresh run. Missing values use model defaults. The default path is `model.json` in the current folder. This option cannot be used with `--resume`.
 - `--resume` loads model and optimizer tensors from `CHECKPOINT`. It cannot be used with `--run` or `--config`.
-- `--run NAME` creates `runs/NAME/`. Do not combine it with `CHECKPOINT` or `--resume`.
+- `--run NAME` creates `runs/NAME/`. Use one relative folder name without path separators. Empty names, `.` and `..` are invalid. Do not combine it with `CHECKPOINT` or `--resume`. Use `CHECKPOINT` for an arbitrary path.
 - `--updates N` sets target-byte optimizer updates. The default is `1000`. Use a positive value. On resume, this count is added to the saved optimizer step.
 - `--log-every N` sets the progress interval in updates during a train run. The default is `100`. Use a positive value.
 - `--seed N` sets the Python and MLX seeds. The default is `11`.
