@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 
 class CliTests(unittest.TestCase):
-    manifest_fields = {'config', 'seed', 'data_glob', 'data_files', 'updates', 'objective',
+    manifest_fields = {'config', 'seed', 'data_glob', 'data_files', 'updates', 'log_every', 'objective',
                        'completed_updates', 'resume', 'initial_optimizer_step',
                        'started_at', 'status', 'last_checkpoint'}
 
@@ -92,7 +92,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             run('init')
             (root / 'model.json').write_text('{"dim":4,"layers":1,"spread":4}')
             (root / 'data/train/tiny.bin').write_bytes(b'abcd')
-            run('train', '--data', 'data/train/*', '--run', 'first', '--updates', '3')
+            progress = run('train', '--data', 'data/train/*', '--run', 'first', '--updates', '3', '--log-every', '2')
+            self.assertIn('updates: 2, objective: tmt, loss:', progress)
+            self.assertIn('updates: 3, objective: tmt, loss:', progress)
             checkpoint = root / 'runs/first/model.safetensors'
             model, settings = load_model(checkpoint)
             self.assertEqual((settings['dim'], settings['layers'], settings['spread'], model.optimizer.state['step'].item()), (4, 1, 4, 3))
@@ -143,6 +145,23 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             (root / 'grid.json').write_text('{"seed": [11, 22]}')
             (root / 'train.bin').write_bytes(b'abc')
             (root / 'dev.bin').write_bytes(b'xyz')
+            for count in ('0', '-1'):
+                result = run('train', '--data', 'train.bin', '--run', 'invalid', '--updates', count)
+                self.assertIn('updates must be positive', result.stderr)
+                self.assertFalse((root / 'runs').exists())
+                result = run('sweep', '--grid', 'grid.json', '--data', 'train.bin',
+                             '--development', 'dev.bin', '--output', 'invalid', '--updates', count)
+                self.assertIn('updates must be positive', result.stderr)
+                self.assertFalse((root / 'invalid').exists())
+                result = run('evaluate', 'missing.safetensors', '--data', 'dev.bin', '--windows', count)
+                self.assertIn('evaluation windows must be positive', result.stderr)
+                result = run('generate', 'missing.safetensors', '--prompt', 'x',
+                             '--output', 'sample.bin', '--log-every', count)
+                self.assertIn('log-every must be positive', result.stderr)
+                self.assertFalse((root / 'sample.bin').exists())
+            result = run('generate', 'missing.safetensors', '--prompt', 'x',
+                         '--output', 'sample.bin', '--bytes', '-1')
+            self.assertIn('bytes must be nonnegative', result.stderr)
             args = ['sweep', '--grid', 'grid.json', '--data', 'train.bin',
                     '--development', 'dev.bin', '--output', 'sweep', '--updates', '2']
             (root / 'sweep').mkdir()  # An existing empty folder is valid.
@@ -372,10 +391,47 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                     self.assertEqual((record['status'], record['seed'], record['objective'], record['resume'], record['initial_optimizer_step']),
                                      (status, 17, 'ce_only', resume, 2 if resume else 0))
                     self.assertEqual(record['last_checkpoint'], str(checkpoint.resolve()) if resume else None)
+                    metrics = [json.loads(line) for line in (checkpoint.parent / 'manifest/loss.jsonl').read_text().splitlines()]
+                    self.assertEqual([(row['completed_updates'], row['objective']) for row in metrics], [(1, 'ce_only')])
+                    self.assertTrue(math.isfinite(metrics[0]['loss']))
                     if resume:
                         self.assertEqual(checkpoint.read_bytes(), original)
                     else:
                         self.assertFalse(checkpoint.exists())
+
+    def test_train_loss_intervals(self):
+        from io import StringIO
+        import mlx.core as mx
+        from tmt.cli import train
+        from tmt.main import Model
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / 'train.bin'
+            data.write_bytes(b'abcdef')
+            for updates, interval, expected in ((5, 2, [2, 4, 5]), (4, 2, [2, 4]), (3, 100, [3])):
+                with self.subTest(updates=updates, interval=interval):
+                    checkpoint = root / 'model.safetensors'
+                    losses, stdout = [], StringIO()
+                    original = Model.train_step
+
+                    def capture(model, *args):
+                        result = original(model, *args)
+                        losses.append(float(result[2].item()))
+                        return result
+
+                    with patch.object(Model, 'train_step', capture), contextlib.redirect_stdout(stdout):
+                        model = train(self._tiny_settings(), checkpoint, str(data), updates,
+                                      ce_only=True, log_every=interval)
+                    metrics = [json.loads(line) for line in (root / 'manifest/loss.jsonl').read_text().splitlines()]
+                    self.assertEqual(metrics, [dict(completed_updates=index, objective='ce_only', loss=losses[index - 1]) for index in expected])
+                    self.assertEqual(stdout.getvalue().count('loss:'), len(expected))
+                    self.assertIn(f'updates: {updates}, objective: ce_only, loss: {losses[-1]:.6f}', stdout.getvalue())
+                    self.assertEqual(json.loads((root / 'manifest/run.json').read_text())['log_every'], interval)
+                    with contextlib.redirect_stdout(StringIO()):
+                        reference = train(self._tiny_settings(), root / 'reference/model.safetensors',
+                                          str(data), updates, ce_only=True)
+                    self.assertTrue(mx.array_equal(model.decoder.decode.weight, reference.decoder.decode.weight).item())
 
     def test_evaluate(self):
         import mlx.core as mx
@@ -397,6 +453,10 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
         mx.eval(*saved)
         def unchanged(): self.assertTrue(all(mx.array_equal(getattr(block, field), value).item() for field, value in zip(fields, saved)))
         uniform[0] = True
+        for windows in ((0,), (-1,), (1, 0)):
+            with self.assertRaisesRegex(ValueError, 'windows must be positive'):
+                evaluate(model, [b'ab'], windows)
+            unchanged()
         for documents in ([], [b''], [b'a', b'b']):
             with self.assertRaisesRegex(ValueError, 'at least one target'):
                 evaluate(model, documents)
@@ -525,6 +585,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self._assert_rejected(path, mx, load_model, arrays, metadata, name[2:], 'dtype')
 
     def test_generate(self):
+        from io import StringIO
         from tmt.cli import generate
 
         with tempfile.TemporaryDirectory() as directory:
@@ -532,13 +593,22 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
             self._checkpoint(path)
             original = path.read_bytes()
             first_path, second_path = Path(directory) / 'first.bin', Path(directory) / 'second.bin'
-            first = generate(path, 'The ', first_path, 11, 16)
+            stdout = StringIO()
+            with contextlib.redirect_stdout(stdout):
+                first = generate(path, 'The ', first_path, 11, 16, log_every=5)
+            self.assertEqual([line for line in stdout.getvalue().splitlines() if line.startswith('generated bytes:')],
+                             ['generated bytes: 5/16', 'generated bytes: 10/16', 'generated bytes: 15/16'])
             second = generate(path, 'The ', second_path, 11, 16)
             self.assertEqual((len(first), len(second)), (16, 16))
             self.assertEqual(first, second)
             self.assertEqual(first_path.read_bytes(), first)
             self.assertEqual(second_path.read_bytes(), second)
             self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(generate(path, 'The ', first_path, count=0), b'')
+            self.assertEqual(first_path.read_bytes(), b'')
+            with self.assertRaisesRegex(ValueError, 'bytes must be nonnegative'):
+                generate(path, 'The ', first_path, count=-1)
+            self.assertEqual(first_path.read_bytes(), b'')
 
     def test_sweep(self):
         from io import StringIO
@@ -564,7 +634,7 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                 with self.subTest(ce_only=ce_only):
                     output, stdout = root / ('runs-ce' if ce_only else 'runs'), StringIO()
                     with contextlib.redirect_stdout(stdout):
-                        best = sweep(grid, str(train), str(development), output, config, 2, 11, ce_only, max_bytes=4)
+                        best = sweep(grid, str(train), str(development), output, config, 2, 11, ce_only, max_bytes=4, log_every=1)
                     rows = [json.loads(line) for line in (output / 'results.jsonl').read_text().splitlines()]
                     self.assertEqual([(row['settings']['dim'], row['seed']) for row in rows], [(4, 11), (4, 22), (8, 11), (8, 22)])
                     self.assertEqual(best, min(rows, key=lambda row: row['development_bpb']))
@@ -577,6 +647,9 @@ runpy.run_module('tmt', run_name='__main__', alter_sys=True)
                         self.assertEqual((set(manifest), manifest['status'], manifest['last_checkpoint']),
                                          (self.manifest_fields, 'complete', str(checkpoint.resolve())))
                         self.assertEqual(manifest['config'], row['settings'])
+                        self.assertEqual(manifest['log_every'], 1)
+                        metrics = [json.loads(line) for line in (checkpoint.parent / 'manifest/loss.jsonl').read_text().splitlines()]
+                        self.assertEqual([metric['completed_updates'] for metric in metrics], [1, 2])
                         for field in ('seed', 'updates', 'objective', 'data_glob'):
                             self.assertEqual(manifest[field], row[field])
                         self.assertEqual((manifest['data_files'], manifest['completed_updates'], manifest['resume'], manifest['initial_optimizer_step']),

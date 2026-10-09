@@ -86,22 +86,33 @@ A positional checkpoint excludes `--run`. Resume requires that positional checkp
 Resume restores model and optimizer tensors, then adds the requested updates with a new data pass.
 It resets internal state and RTU traces at the first document. It does not restore the file cursor or RNG state.
 
-The trainer writes `manifest/run.json` beside the checkpoint at start and exit only.
+The trainer writes `manifest/run.json` beside the checkpoint at start and exit.
 The record contains model `config`, invocation `seed`, UTC `started_at`, `status`, and `last_checkpoint`.
 Status is `running`, `complete`, `failed`, or `interrupted`. A resume replaces the record for the invocation.
 
-The record also contains `data_glob`, absolute `data_files` in shuffled pass order, requested `updates`, and `objective`.
+The trainer writes one JSON object per line to `manifest/loss.jsonl`.
+Use `--log-every N` to set the update interval. Its default is `100` updates.
+Each row records `completed_updates`, `objective`, and the latest update's `loss`.
+
+After at least one update, the trainer writes a final row at exit if the last update was outside the interval.
+The trainer does not duplicate an interval row when the run ends on that interval.
+Each invocation replaces this file. This also applies to a resume.
+
+The record also contains `data_glob`, absolute `data_files` in shuffled pass order, requested `updates`, `log_every`, and `objective`.
 The objective is `tmt` for the full loss or `ce_only` for next-byte cross entropy.
 The file list includes all matched paths. The update budget can stop a pass before the trainer reads every file.
 Paths identify the file selection but do not prove that file contents stay the same.
 
 `resume` identifies a resume invocation. `initial_optimizer_step` is the saved optimizer step at resume start, or zero for a fresh run.
 `updates` is the budget for this invocation, with additional updates on resume.
+
 `completed_updates` is zero at start and counts completed updates at exit, after success, failure, or interrupt.
 This count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
 See the [manifest fields](src/tmt/commands.md#train) for details.
 
-The trainer saves every 500 updates and at normal completion. It prints save feedback only after success.
+The trainer prints completed updates, objective, and loss at each interval. It always prints the final loss.
+
+It saves every 500 updates and at normal completion. It prints save feedback only after success.
 Ctrl-C does not save. Keep the last successful checkpoint. Direct writes can leave partial files after a process failure.
 
 ## Scores and limits
@@ -118,7 +129,7 @@ The default input budget is 8192 bytes across sorted files. Each context window 
 
 Sweep requires a new or empty output folder. It rejects a nonempty folder without changes.
 Sweep appends one row per completed candidate to `results.jsonl`. It selects the lowest development BPB, with the first candidate as tie winner.
-Candidates use `run-NNNN/` folders with `model.safetensors`, `manifest/model.json`, and `manifest/run.json`.
+Candidates use `run-NNNN/` folders with `model.safetensors`, `manifest/model.json`, `manifest/run.json`, and `manifest/loss.jsonl`.
 
 The byte-only benchmark always uses 393 input bytes, 390 targets, and 104 common targets with windows 1, 8, 32, and 128.
 For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data cola.tsv --epochs 1 --split 0.5`.
@@ -126,11 +137,14 @@ For optional CoLA, use `tmt benchmark runs/first/model.safetensors --cola-data c
 CoLA uses four-column TSV rows, a contiguous split, and head-only updates. It reports MCC times 100.
 
 Generation encodes its nonempty prompt as UTF-8 and writes raw bytes without the prompt.
+It prints byte progress at each `--log-every` interval. The default interval is `1000` bytes.
 
 Checkpoints require complete model and optimizer tensors plus version-1 model metadata. The loader checks names, shapes, and dtypes.
-Keep output paths apart from input paths. The CLI does not check collisions, train/development overlap, or numeric ranges.
+Keep output paths apart from input paths. The CLI does not check path collisions or train/development overlap.
 
-Use positive update, byte, and window counts. Whole-file reads can require memory equal to the largest file.
+Use a positive value for `--updates`, each value in `--windows`, and `--log-every`.
+Generation accepts `--bytes 0` and writes an empty file. It rejects negative byte counts.
+Whole-file reads can require memory equal to the largest file.
 
 Keep objective loss, frozen BPB, and CoLA MCC separate. Tiny fixtures do not establish general model quality.
 

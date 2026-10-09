@@ -5,7 +5,7 @@ File errors and invalid values print a short error to stderr and exit with code 
 
 Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
 
-The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `dim`, `layers`, and `spread` are integer sizes. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss. The parser checks numeric syntax, not numeric ranges.
+The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `dim`, `layers`, and `spread` are integer sizes. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss. Commands check the count limits that this manual lists.
 
 ## init
 
@@ -46,7 +46,7 @@ Train a model on raw-byte documents and save a strict model and optimizer checkp
 
 ### Syntax
 ```text
-tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--updates N] [--seed N] [--ce-only]
+tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--updates N] [--log-every N] [--seed N] [--ce-only]
 ```
 
 ### Requirements and options
@@ -56,7 +56,8 @@ tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--up
 - `--config PATH` supplies model JSON values for a fresh run. Missing values use model defaults. The default path is `model.json` in the current folder. This option cannot be used with `--resume`.
 - `--resume` loads model and optimizer tensors from `CHECKPOINT`. It cannot be used with `--run` or `--config`.
 - `--run NAME` creates `runs/NAME/`. Do not combine it with `CHECKPOINT` or `--resume`.
-- `--updates N` sets target-byte optimizer updates. The default is `1000`. On resume, this count is added to the saved optimizer step.
+- `--updates N` sets target-byte optimizer updates. The default is `1000`. Use a positive value. On resume, this count is added to the saved optimizer step.
+- `--log-every N` sets the training progress interval in updates. The default is `100`. Use a positive value.
 - `--seed N` sets the Python and MLX seeds. The default is `11`.
 - `--ce-only` uses next-byte cross entropy. Without it, the command uses the full TMT objective.
 - Get MLX, a valid model config, and at least one file that matches `GLOB` for a fresh run.
@@ -87,6 +88,7 @@ A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp ru
 | `data_glob` | The train glob as supplied. Relative globs use the invocation directory. |
 | `data_files` | All matched absolute paths, in the shuffled order for each data pass. |
 | `updates` | Requested target-byte optimizer updates for this invocation. Resume adds this budget to the saved optimizer step. |
+| `log_every` | Update interval for progress output and loss rows. |
 | `objective` | `tmt` for the full TMT loss, or `ce_only` for next-byte cross entropy. |
 | `completed_updates` | Zero at start. Completed updates in this invocation at exit, after success, failure, or interrupt. |
 | `resume` | `true` for resume, or `false` for a fresh run. |
@@ -97,11 +99,22 @@ A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp ru
 
 The file list records selection and pass order. The update budget can stop a pass before the trainer reads every file. Paths do not prove that file contents stay the same. The completed update count includes work after the last checkpoint. It does not imply that the trainer saved all completed updates.
 
-The command writes the manifest at start and exit. The checkpoint contains model and optimizer tensors. The loader checks metadata, tensor names, shapes, and types before restore.
+The command writes the manifest at start and exit. It writes progress loss rows to `manifest/loss.jsonl` beside the checkpoint.
+Each line is a JSON object with `completed_updates`, `objective`, and `loss`. The loss is the scalar from the latest update.
+
+The command writes a row at each `--log-every` interval. After at least one update, it writes a final row at exit.
+It writes the row only if the last update was outside the interval.
+This also applies after failure or interrupt. The command does not duplicate an interval row when the run ends on that interval.
+
+Each invocation replaces `loss.jsonl`. This also applies to a resume.
+
+The checkpoint contains model and optimizer tensors. The loader checks metadata, tensor names, shapes, and types before restore.
 
 At fresh-run start, `last_checkpoint` is null. Resume starts with the input checkpoint path and replaces the invocation manifest. Each successful save sets `last_checkpoint` to the absolute path. Resume adds the requested optimizer updates and starts a new data pass. It does not restore a data cursor or random-number state.
 
-The command prints the run folder, seed, config, successful checkpoint saves, and final loss. It saves every 500 updates and at the end. It does not save on interrupt. The last successful checkpoint remains on disk.
+The command prints the run folder, seed, config, and successful checkpoint saves.
+At each progress interval, it prints completed updates, objective, and loss. It always prints the final loss.
+It saves every 500 updates and at the end. It does not save on interrupt. The last successful checkpoint remains on disk.
 
 ## sweep
 
@@ -109,7 +122,7 @@ Run each combination in a JSON grid in sequence, then score each trained model o
 
 ### Syntax
 ```text
-tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH] [--updates N] [--seed N] [--ce-only] [--max-bytes N]
+tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH] [--updates N] [--log-every N] [--seed N] [--ce-only] [--max-bytes N]
 ```
 
 ### Requirements and options
@@ -119,7 +132,8 @@ tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH
 - `--development GLOB` is required and selects raw-byte score files. Quote the glob.
 - `--output DIR` is required. The folder must be new or empty. The command rejects a nonempty folder without changes.
 - `--config PATH` selects the base model JSON. The default is `model.json` in the current folder.
-- `--updates N` sets target-byte updates per candidate. The default is `1000`.
+- `--updates N` sets target-byte updates per candidate. The default is `1000`. Use a positive value.
+- `--log-every N` sets the training progress interval in updates for each candidate. The default is `100`. Use a positive value.
 - `--seed N` sets the seed when the grid has no `seed` field. The default is `11`.
 - `--ce-only` selects next-byte cross entropy. The default objective is full TMT.
 - `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes.
@@ -139,7 +153,7 @@ tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --ou
 ### Behavior and files
 The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
 
-Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+Each candidate config is `run-NNNN/manifest/model.json`. Its run record is `run-NNNN/manifest/run.json`, with the same manifest fields as a standalone train invocation. Its loss rows are in `run-NNNN/manifest/loss.jsonl`. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
 
 At the end, the command prints the row with the lowest development BPB. The first candidate wins a tie. The command does not write a separate best-model file.
 
@@ -159,9 +173,9 @@ tmt evaluate CHECKPOINT --data GLOB [--max-bytes N] [--windows N [N ...]] [--out
 - `CHECKPOINT` is required. It must contain valid model and optimizer tensors.
 - `--data GLOB` is required. Quote the glob so the CLI expands it.
 - `--max-bytes N` sets the global input-byte limit across sorted files. The default is `8192` bytes.
-- `--windows N [N ...]` selects context lengths in input bytes. The default is no context-window scores.
+- `--windows N [N ...]` selects context lengths in input bytes. The default is no context-window scores. Every value must be positive.
 - `--output PATH` writes the score object as JSON. Without this option, scores go to the terminal.
-- Evaluation needs MLX and at least one file that matches `GLOB`. Use positive integer context lengths.
+- Evaluation needs MLX and at least one file that matches `GLOB`.
 
 ### Workflow
 
@@ -223,7 +237,7 @@ Use a UTF-8 text prompt to produce a fixed number of raw output bytes from a fro
 
 ### Syntax
 ```text
-tmt generate CHECKPOINT --prompt TEXT --output PATH [--seed N] [--bytes N] [--temperature VALUE]
+tmt generate CHECKPOINT --prompt TEXT --output PATH [--seed N] [--bytes N] [--log-every N] [--temperature VALUE]
 ```
 
 ### Requirements and options
@@ -232,14 +246,15 @@ tmt generate CHECKPOINT --prompt TEXT --output PATH [--seed N] [--bytes N] [--te
 - `--prompt TEXT` is required and must not be empty. The command encodes it as UTF-8.
 - `--output PATH` is required. Its parent folder must exist and allow writes.
 - `--seed N` sets the model load and sample seed. The default is `11`.
-- `--bytes N` sets the output byte count. The default is `512`.
+- `--bytes N` sets the output byte count. The default is `512`. Zero writes an empty file. Negative values are invalid.
+- `--log-every N` sets the output progress interval in bytes. The default is `1000`. Use a positive value.
 - `--temperature VALUE` overrides the checkpoint value. The default uses the checkpoint value.
-- Generation needs MLX. Use a nonnegative byte count. A negative value writes an empty file.
+- Generation needs MLX. The output byte count can be zero or positive.
 
 ### Workflow
 
 1. Select a checkpoint.
-2. Choose a nonempty text prompt.
+2. Choose a nonempty text prompt. Set `--bytes 0` to create an empty output file.
 3. Choose an output path outside files that you need to keep.
 4. Read the output as bytes. It does not include the prompt.
 
@@ -248,7 +263,7 @@ tmt generate runs/first/model.safetensors --prompt "The key is" --output runs/fi
 ```
 
 ### Behavior and files
-The command replays the prompt bytes through the model, then samples the requested number of bytes. The model weights stay frozen. The command writes only generated bytes to `PATH` and prints the byte count. The output file replaces a file that already exists at that path. The command does not create its parent folder. Output bytes can be invalid UTF-8.
+The command replays the prompt bytes through the model, then samples the requested number of bytes. The model weights stay frozen. The command prints the generated byte count at each progress interval and at completion. It writes only generated bytes to `PATH`. A zero byte count creates an empty file. The output file replaces a file that already exists at that path. The command does not create its parent folder. Output bytes can be invalid UTF-8.
 
 A temperature of zero still samples. The model applies a minimum temperature of `0.1`.
 
@@ -292,7 +307,7 @@ tmt --version
 ```
 
 ### Behavior and limits
-`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. `tmt --help COMMAND` and `tmt COMMAND --help` print the same section text. The `-h` forms do the same. A help request after other command arguments still prints the manual before the CLI checks those arguments or starts an experiment.
+`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. `tmt --help COMMAND` and `tmt COMMAND --help` print the same section text. The `-h` forms do the same. A help request after other command arguments still prints the manual before the CLI checks those arguments or starts an experiment. It behaves like the man command on any linux shell.
 
 An unknown help topic gives a short parser error and exit code `2`. A manual request does not need a valid file path. The version command reads installed distribution metadata from `test-model-thing`.
 

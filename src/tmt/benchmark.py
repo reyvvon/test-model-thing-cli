@@ -69,6 +69,8 @@ def _bpb(nll_sum, targets):
 def evaluate(model, documents, windows=()):
     """Score next bytes with frozen steps and restore live states and RTU traces."""
     documents, windows = tuple(documents), tuple(windows)
+    if any(window <= 0 for window in windows):
+        raise ValueError('evaluation windows must be positive')
     input_bytes = sum(len(document) for document in documents)
     targets = sum(max(len(document) - 1, 0) for document in documents)
     if targets == 0:
