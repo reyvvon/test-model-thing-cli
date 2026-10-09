@@ -32,33 +32,51 @@ Also below is some results from CoLA after training a model for ~30 minutes. GPT
 <img width="449" height="273" alt="Screenshot 2026-09-19 at 4 53 25 PM" src="https://github.com/user-attachments/assets/66cd054d-61c0-442a-a0bd-24352dac3f58" />
 
 
-## Training your own model
+## Install and train a model
 
-Model weights (in ```.safetensors```) are not provided because GitHub doesn't like very large files. But, you can train your own model simply by initializing a ```venv``` and installing dependencies with ```pip install mlx``` on Mac or ```pip install mlx[cuda]``` on Linux with GPU or ```pip install mlx[cpu]``` on Linux with CPU. Then run ```main.py```.
+Use Python 3.12 or 3.13 and a functional MLX runtime.
+From the checkout, create a virtual environment and install the CLI:
 
 ```bash
-python main.py <path> train
-python main.py <path> chat
-
-# only use crossentropy loss
-python main.py <path> chat --ce-only
-
-# does not save to disk
-python main.py <path> chat --no-save
-
-# does not modify weights
-python main.py <path> chat --frozen
-
-# does not save to disk or modify weights
-python main.py <path> chat --no-save --frozen
-
-# benchmark with CoLA
-python benchmark.py <path> <epochs> <slice>
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install .
+tmt --version
 ```
 
-You will have to configure your own dataset to run dataset mode, but you should be able to run chat mode without modifying anything if you have weights already.
+Activation adds `.venv/bin` to PATH for this terminal.
+Developers can use `python -m pip install -e .` so source edits take effect directly.
+For an optional persistent PATH configuration, see [the CLI guide](CLI.md#installation-and-path).
+`python -m tmt` also runs the CLI.
+The version uses installed package metadata. Local and wheel installs normally report `commit unknown`.
 
-Once it begins training, you can safely ^C the program and it will save weights. It will also periodically save weights every so often. The saved weights include the internal memory so the model will remember that the next time it runs. You can launch into chat mode and the memory should carry on from whatever it was learning in training.
+Create a workspace in any folder, then supply raw-byte files:
+
+```bash
+mkdir my-workspace
+cd my-workspace
+tmt init
+# Select a tiny model for this example.
+printf '{"dim":4,"layers":1,"spread":4}\n' > model.json
+printf abcd > data/train/tiny.bin
+tmt train --data 'data/train/*' --run first --updates 3
+tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2
+tmt evaluate runs/first/model.safetensors --data 'data/train/*' --windows 1 2
+tmt generate runs/first/model.safetensors --prompt 'The ' --output sample.bin --bytes 4
+tmt benchmark runs/first/model.safetensors
+```
+
+Fresh train and sweep commands use `model.json` in the current folder by default.
+`--config PATH` selects another model JSON for a fresh run.
+
+Resume uses checkpoint settings and adds updates with a new data pass. It does not restore the file cursor or RNG state.
+
+The trainer saves every 500 updates and at normal completion. Ctrl-C does not save. Keep the last successful checkpoint.
+
+Read [the CLI guide](CLI.md) for workspace files, explicit checkpoint paths, sweeps, optional CoLA, and limits.
+Read the [command manual](src/tmt/commands.md) or use `tmt help`.
+Use [train](src/tmt/commands.md#train) for run and resume options.
+The tiny example checks commands. It does not establish model quality.
 
 ## A graphical view (partially outdated)
 

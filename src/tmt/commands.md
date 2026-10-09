@@ -1,0 +1,280 @@
+# TMT command manual
+This manual describes the installed `tmt` command. Use Python 3.12 or 3.13 and install the package with pip. Commands that create a model or use a checkpoint need MLX. Manual requests need no MLX, model, config, data, or checkpoint. Use `-h` or `--help` for the command index or one topic. Use `--version` for package details.
+
+Relative paths use the current directory. The CLI does not search parent folders for files or runs. Data globs select raw files. The CLI sorts paths that match. Each file is one document, and the model resets at each document boundary. The CLI reads file contents as bytes, adds no separators, and does not decode them as text.
+
+The model config accepts `dim`, `layers`, `spread`, `temp`, `rate`, and `bound`. Defaults are `512`, `16`, `32`, `0.75`, `0.0005`, and `[40000, 120000]`. `dim`, `layers`, and `spread` are integer sizes. `rate` is the learning rate, `temp` is a unitless sampler value, and `bound` uses optimizer updates. The full TMT objective combines variance, latent-space prediction, next-byte cross entropy, and stop loss. The parser checks numeric syntax, not numeric ranges.
+
+## init
+
+Create model and sweep templates in the current folder, or write one model config at a chosen path.
+
+### Syntax
+```text
+tmt init [--output PATH]
+```
+
+### Requirements and options
+
+- `--output PATH` is optional. It writes only model JSON to `PATH`. Without this option, `init` prepares the current folder.
+- The destination folder must allow file and directory creation. A JSON destination that exists raises `FileExistsError` and keeps its contents.
+- `init` reads model constructor defaults and needs MLX. It does not create a model, checkpoint, or run record.
+
+### Workflow
+
+1. Go to the folder for the workspace.
+2. Run `tmt init`.
+3. Edit `model.json` to set small model values for a first run.
+4. Put one or more raw-byte files in `data/train/`.
+
+```bash
+tmt init --output configs/model.json
+```
+
+### Behavior and files
+Bare `tmt init` creates `model.json`, `grid.json`, and `run.example.json`. It also creates `data/train/`, `data/dev/`, and `runs/` if needed. `model.json` contains the model constructor defaults. Edit it before a real experiment.
+
+`grid.json` has `dim=[4,8]`, `layers=[1]`, `spread=[4]`, and `seed=[11,22]`. `run.example.json` shows the five manifest fields. It is a template, not a run record. The command opens each JSON destination in exclusive-create mode. If a destination exists, Python raises `FileExistsError`, and the old file stays intact.
+
+The `--output` form creates parent folders as needed. It writes only the model config and does not create workspace folders.
+
+## train
+
+Train a model on raw-byte documents and save a strict model and optimizer checkpoint.
+
+### Syntax
+```text
+tmt train [CHECKPOINT] --data GLOB [--config PATH | --resume] [--run NAME] [--updates N] [--seed N] [--ce-only]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is an optional checkpoint path for a fresh run. With `--resume`, it is required and names the checkpoint to load.
+- `--data GLOB` is required. Quote the glob so the CLI, not the shell, expands it.
+- `--config PATH` supplies model JSON values for a fresh run. Missing values use model defaults. The default path is `model.json` in the current folder. This option cannot be used with `--resume`.
+- `--resume` loads model and optimizer tensors from `CHECKPOINT`. It cannot be used with `--run` or `--config`.
+- `--run NAME` creates `runs/NAME/`. Do not combine it with `CHECKPOINT` or `--resume`.
+- `--updates N` sets target-byte optimizer updates. The default is `1000`. On resume, this count is added to the saved optimizer step.
+- `--seed N` sets the Python and MLX seeds. The default is `11`.
+- `--ce-only` uses next-byte cross entropy. Without it, the command uses the full TMT objective.
+- Get MLX, a valid model config, and at least one file that matches `GLOB` for a fresh run.
+
+### Workflow
+
+1. Run `tmt init` in the workspace.
+2. Edit `model.json`, then add raw-byte files under `data/train/`.
+3. Start a named run with the example command.
+4. To add updates, pass that path and `--resume`.
+
+```bash
+tmt train --data 'data/train/*' --run first --updates 3
+tmt train runs/first/model.safetensors --data 'data/train/*' --resume --updates 2
+```
+
+### Behavior and files
+The CLI sorts matched paths and shuffles them once from `--seed`. It repeats that order until it reaches `--updates`. Each adjacent byte pair gives one target-byte update. The model resets internal state and RTU traces at each file boundary. A file with fewer than two bytes gives no update. It consumes the terminal byte without an update.
+
+A named run writes `runs/NAME/model.safetensors`. Without `CHECKPOINT` or `--run`, the CLI creates a UTC timestamp folder with microseconds under `runs/`. A named or timestamp run needs a new folder.
+
+A named run stores its manifest at `runs/NAME/manifest/run.json`. A timestamp run stores it at `runs/<TIMESTAMP>/manifest/run.json`. An explicit checkpoint stores it at `manifest/run.json` under its parent folder. The five fields are `config` (model settings), `seed`, `started_at` (UTC time), `status`, and `last_checkpoint`. Status is `running`, `complete`, `interrupted`, or `failed`.
+
+The command writes the manifest at start and exit. The checkpoint contains model and optimizer tensors. The loader checks metadata, tensor names, shapes, and types before restore.
+
+At fresh-run start, `last_checkpoint` is null. Resume starts with the input checkpoint path and replaces the invocation manifest. Each successful save sets `last_checkpoint` to the absolute path. Resume adds the requested optimizer updates and starts a new data pass. It does not restore a data cursor or random-number state.
+
+The command prints the run folder, seed, config, successful checkpoint saves, and final loss. It saves every 500 updates and at the end. It does not save on interrupt. The last successful checkpoint remains on disk.
+
+## sweep
+
+Run each combination in a JSON grid in sequence, then score each trained model on development bytes.
+
+### Syntax
+```text
+tmt sweep --grid PATH --data GLOB --development GLOB --output DIR [--config PATH] [--updates N] [--seed N] [--ce-only] [--max-bytes N]
+```
+
+### Requirements and options
+
+- `--grid PATH` is required. The JSON object maps model fields or `seed` to arrays of values.
+- `--data GLOB` is required and selects raw-byte train files. Quote the glob.
+- `--development GLOB` is required and selects raw-byte score files. Quote the glob.
+- `--output DIR` is required. The command creates the folder when it does not exist.
+- `--config PATH` selects the base model JSON. The default is `model.json` in the current folder.
+- `--updates N` sets target-byte updates per candidate. The default is `1000`.
+- `--seed N` sets the seed when the grid has no `seed` field. The default is `11`.
+- `--ce-only` selects next-byte cross entropy. The default objective is full TMT.
+- `--max-bytes N` limits development input to a global prefix across sorted files. The default is `8192` bytes.
+- A sweep needs MLX, the grid and data files, and the base config file.
+
+### Workflow
+
+1. Run `tmt init` and edit `model.json`.
+2. Edit `grid.json` to list values for the fields to compare.
+3. Put train and development files in separate folders.
+4. Read `results.jsonl` and compare each candidate's development BPB.
+
+```bash
+tmt sweep --grid grid.json --data 'data/train/*' --development 'data/dev/*' --output runs/sweep --updates 1000
+```
+
+### Behavior and files
+The CLI visits value combinations in the key and value order from the JSON file. It trains one candidate at a time. A grid `seed` value selects that candidate's seed. Other grid values replace fields in the base model config. Each candidate uses a `run-NNNN/` folder under `DIR`. The folder contains `model.safetensors` and a `manifest/` folder.
+
+Each candidate config is `run-NNNN/manifest/model.json`. Its five-field run record is `run-NNNN/manifest/run.json`. The command appends one JSON result per candidate to `results.jsonl`. Each row records `run`, `settings`, `seed`, `updates`, `objective`, `data_glob`, `development_glob`, `development_max_bytes`, `development_targets`, `development_bpb`, and `checkpoint`.
+
+At the end, the command prints the row with the lowest development BPB. The first candidate wins a tie. The command does not write a separate best-model file.
+
+Use a new output folder for a new sweep. A repeated command reuses candidate folders and appends more rows to `results.jsonl`.
+
+## evaluate
+
+Measure next-byte prediction on raw-byte documents with frozen model weights.
+
+### Syntax
+```text
+tmt evaluate CHECKPOINT --data GLOB [--max-bytes N] [--windows N [N ...]] [--output PATH]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is required. It must contain valid model and optimizer tensors.
+- `--data GLOB` is required. Quote the glob so the CLI expands it.
+- `--max-bytes N` sets the global input-byte limit across sorted files. The default is `8192` bytes.
+- `--windows N [N ...]` selects context lengths in input bytes. The default is no context-window scores.
+- `--output PATH` writes the score object as JSON. Without this option, scores go to the terminal.
+- Evaluation needs MLX and at least one file that matches `GLOB`. Use positive integer context lengths.
+
+### Workflow
+
+1. Select a checkpoint from a completed train or sweep run.
+2. Put held-out raw-byte files in a separate folder.
+3. Run evaluation with a quoted file glob.
+4. Add `--windows` to compare limited context lengths.
+
+```bash
+tmt evaluate runs/first/model.safetensors --data 'data/dev/*' --windows 8 32 128 --output runs/first/evaluation.json
+```
+
+### Behavior and files
+The command reads a global prefix from sorted files and keeps each file as a separate document. The first byte provides context for the next-byte score. The scorer consumes the terminal byte without a target score. The full score uses all earlier bytes to predict the next byte. A window score uses only its selected context length. The report includes input bytes, target count, full BPB, common-target count, common BPB, and each requested window score.
+
+Common scores use target offsets at or above the largest requested window. If no common targets remain, common BPB and window deltas are null. The scorer saves and restores internal state and RTU traces, after success or error. It does not update weights or draw random samples. The optional JSON file contains the printed score values. The command does not alter the checkpoint.
+
+## benchmark
+
+Run the fixed byte benchmark suite. Optionally train a small CoLA classification head and report its score.
+
+### Syntax
+```text
+tmt benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRACTION] [--seed N]
+python -m tmt.benchmark CHECKPOINT [--cola-data PATH] [--epochs N] [--split FRACTION] [--seed N]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
+- `--cola-data PATH` selects a local four-column CoLA TSV. Without it, the command runs only the byte suite.
+- `--epochs N` sets CoLA head epochs. The default is `1`. It does not change the fixed byte suite.
+- `--split FRACTION` sets the contiguous CoLA train fraction. The default is `0.5`.
+- `--seed N` sets the checkpoint load and CoLA head seed. The default is `11`.
+- The benchmark needs MLX. CoLA needs a readable TSV with at least two valid rows. The command does not download data.
+
+### Workflow
+
+1. Select a checkpoint from a train or sweep run.
+2. Run the fixed byte suite.
+3. To include CoLA, supply a local four-column TSV.
+4. Set `--epochs`, `--split`, or `--seed` only when needed.
+
+```bash
+tmt benchmark runs/first/model.safetensors
+tmt benchmark runs/first/model.safetensors --cola-data data/cola.tsv --epochs 1 --split 0.5
+```
+
+### Behavior and files
+The fixed suite uses 393 input bytes in three documents and context windows of 1, 8, 32, and 128 bytes. It reports 390 full-history targets and 104 common targets. The common count uses the suffix shared by all windows. For CoLA, the loader reads the sentence from column four and the label from column two. It keeps the input row order. The fixed suite does not establish general model quality.
+
+The split is contiguous. Values below 0 or above 1 are clipped to that range. The model weights stay frozen, and only a separate linear classification head receives updates. The command reports train and held-out confusion counts with MCC multiplied by 100. The score range is -100 to 100.
+
+The benchmark prints results to the terminal. It does not save a report or checkpoint. A missing supplied TSV raises an ordinary file error.
+
+## generate
+
+Use a UTF-8 text prompt to produce a fixed number of raw output bytes from a frozen checkpoint.
+
+### Syntax
+```text
+tmt generate CHECKPOINT --prompt TEXT --output PATH [--seed N] [--bytes N] [--temperature VALUE]
+```
+
+### Requirements and options
+
+- `CHECKPOINT` is required and must pass strict model and optimizer tensor checks.
+- `--prompt TEXT` is required and must not be empty. The command encodes it as UTF-8.
+- `--output PATH` is required. Its parent folder must exist and allow writes.
+- `--seed N` sets the model load and sample seed. The default is `11`.
+- `--bytes N` sets the output byte count. The default is `512`.
+- `--temperature VALUE` overrides the checkpoint value. The default uses the checkpoint value.
+- Generation needs MLX. Use a nonnegative byte count. A negative value writes an empty file.
+
+### Workflow
+
+1. Select a checkpoint.
+2. Choose a nonempty text prompt.
+3. Choose an output path outside files that you need to keep.
+4. Read the output as bytes. It does not include the prompt.
+
+```bash
+tmt generate runs/first/model.safetensors --prompt "The key is" --output runs/first/generated.bin --bytes 64 --seed 11
+```
+
+### Behavior and files
+The command replays the prompt bytes through the model, then samples the requested number of bytes. The model weights stay frozen. The command writes only generated bytes to `PATH` and prints the byte count. The output file replaces a file that already exists at that path. The command does not create its parent folder. Output bytes can be invalid UTF-8.
+
+A temperature of zero still samples. The model applies a minimum temperature of `0.1`.
+
+## help
+
+Read the bundled manual or one command section. These requests run before command argument checks and experiment work.
+
+### Syntax
+```text
+tmt help [COMMAND]
+tmt help --help
+tmt --help COMMAND
+tmt -h COMMAND
+tmt COMMAND --help
+tmt COMMAND -h
+tmt --help
+tmt -h
+tmt --version
+```
+
+### Requirements and options
+
+- `COMMAND` is optional after `tmt help`. It can be `init`, `train`, `sweep`, `evaluate`, `benchmark`, `generate`, or `help`.
+- `-h` and `--help` select the same manual section in the listed positions.
+- Bare `tmt --help` and `tmt -h` print a short command index.
+- `tmt --version` prints the installed package version and commit information.
+- Manual and version requests need no MLX, config, data, or checkpoint. They create no files.
+
+### Workflow
+
+1. Run `tmt --help` to view the command index.
+2. Name a command to read its full section.
+3. Use the syntax and workflow in that section to run an experiment.
+
+```bash
+tmt help init
+tmt help help
+tmt --help train
+tmt generate --help
+tmt --version
+```
+
+### Behavior and limits
+`tmt help` prints the complete bundled manual. `tmt help COMMAND` prints one section. `tmt help --help` prints the help section. `tmt --help COMMAND` and `tmt COMMAND --help` print the same section text. The `-h` forms do the same. A help request after other command arguments still prints the manual before the CLI checks those arguments or starts an experiment.
+
+An unknown help topic gives a short parser error and exit code `2`. A manual request does not need a valid file path. The version command reads installed distribution metadata from `test-model-thing`.
+
+It prints `vcs_info.commit_id` from `direct_url.json` when present. Otherwise it prints `commit unknown`. The version command does not inspect the current folder or run Git. Local and wheel installs normally report `commit unknown`. There is no `version` subcommand.
