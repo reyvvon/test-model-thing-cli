@@ -4,8 +4,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tmt.benchmark import cola, run
-# This is where I realized I fucking hate the way I structured this project. I should have put the cola() function in a separate module, and then imported it into benchmark.py. Instead, I put it in benchmark.py, and now I have to import it from there in order to test it. This is a bad design decision, and I regret it.
-# for the record, fuck writing tests. i hate it. i hate it so much
 
 class ColaValidationTests(unittest.TestCase):
     def test_cola_rejects_nonbinary_label_with_tsv_row(self):
